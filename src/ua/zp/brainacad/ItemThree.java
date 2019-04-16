@@ -2,7 +2,7 @@ package ua.zp.brainacad;
 
 /**
  * @author
- * @param  
+ * @param
  */
 public class ItemThree {
     public static void main(String[] args) {
