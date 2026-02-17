@@ -1,0 +1,23 @@
+# Do not track user-provided binary assets
+assets/logos/*
+assets/sounds/*
+
+# Keep folder docs
+!assets/logos/README.txt
+!assets/sounds/README.txt
+
+# Local runtime and virtualenv artifacts
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+arb_dashboard_config.json
+users.db.enc
+auth_secret.key
+.tools/
