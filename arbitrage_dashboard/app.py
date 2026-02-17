@@ -593,6 +593,16 @@ def _session_user(request: Request) -> Optional[Dict[str, Any]]:
     return user
 
 
+def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> Tuple[List[dict], Optional[float], bool, bool]:
+    is_admin = bool(user and user.get("is_admin"))
+    is_paid = bool(user and user.get("subscription_approved"))
+    spread_limit: Optional[float] = None
+    if not (is_admin or is_paid):
+        spread_limit = MAX_FREE_SPREAD
+        rows = [r for r in rows if float(r.get("spread") or 0.0) <= spread_limit]
+    return rows, spread_limit, is_admin, is_paid
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     asyncio.create_task(updater_loop())
@@ -680,7 +690,8 @@ async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await
 function renderAuth(){
   const u=STATE.user;
   const adminBox=document.getElementById('adminBox');
-  if(!u){setAuthStateText('Гость: доступ до 2% спреда'); adminBox.style.display='none'; return;}
+  const lim=STATE.data&&STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit)?`до ${(STATE.data.access.spread_limit*100).toFixed(0)}%`:'';
+  if(!u){setAuthStateText(`Гость: доступ ${lim||'до 2% спреда'}`); adminBox.style.display='none'; return;}
   const status=u.is_admin?'admin (без лимита)':(u.subscription_approved?'подписка активна (без лимита)':'без подписки (до 2%)');
   setAuthStateText(`Пользователь: ${u.username} • ${status}`);
   adminBox.style.display=u.is_admin?'block':'none';
@@ -715,6 +726,8 @@ async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){co
 
 function render(){
 if(!STATE.data)return;
+const srvLimit=(STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit))?STATE.data.access.spread_limit:null;
+if(srvLimit!==null){STATE.data.rows=(STATE.data.rows||[]).filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
 document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
 document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`;
 let rows=applyFilters([...(STATE.data.rows||[])]);
@@ -878,19 +891,16 @@ async def api_assets():
 @app.get("/api/data")
 async def api_data(request: Request):
     user = _session_user(request)
-    is_admin = bool(user and user.get("is_admin"))
-    is_paid = bool(user and user.get("subscription_approved"))
     async with CACHE_LOCK:
         data = dict(CACHE)
         rows = list(CACHE.get("rows", []))
-    if not (is_admin or is_paid):
-        rows = [r for r in rows if float(r.get("spread") or 0.0) <= MAX_FREE_SPREAD]
+    rows, spread_limit, is_admin, is_paid = _limit_rows_for_access(rows, user)
     data["rows"] = rows
     data["access"] = {
         "username": user.get("username") if user else None,
         "is_admin": is_admin,
         "subscription_approved": is_paid,
-        "spread_limit": None if (is_admin or is_paid) else MAX_FREE_SPREAD,
+        "spread_limit": spread_limit,
     }
     return JSONResponse(data)
 
