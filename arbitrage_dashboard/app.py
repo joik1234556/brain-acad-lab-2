@@ -32,8 +32,8 @@ DEFAULT_REFRESH_SEC = 5
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
-MAX_BINGX_SYMBOLS = 180
-BINGX_CONCURRENCY = 16
+MAX_BINGX_SYMBOLS = 220
+BINGX_CONCURRENCY = 12
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
 
 MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
@@ -54,6 +54,7 @@ class MarketRow:
     fund_rate: float
     fund24_est: float
     url: str
+    next_funding_ts: float
 
 
 def mexc_trade_url(symbol_mexc: str) -> str:
@@ -110,21 +111,38 @@ def _pick_float(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
-def funding_eta(interval_h: int = 8) -> str:
+def _pick_ts(d: dict, keys: List[str]) -> float:
+    for key in keys:
+        raw = d.get(key)
+        val = to_float(raw)
+        if not math.isfinite(val):
+            continue
+        if val > 1e12:
+            val = val / 1000.0
+        if val > 1e9:
+            return val
+    return math.nan
+
+
+def funding_eta_str(next_ts: float, fallback_hours: int = 8) -> str:
     now = datetime.now(timezone.utc)
-    base = now.replace(minute=0, second=0, microsecond=0)
-    cur = base.hour
-    next_h = ((cur // interval_h) + 1) * interval_h
-    day = 0
-    if next_h >= 24:
-        next_h -= 24
-        day = 1
-    target = (base + timedelta(days=day)).replace(hour=next_h)
+    if math.isfinite(next_ts) and next_ts > time.time():
+        target = datetime.fromtimestamp(next_ts, tz=timezone.utc)
+    else:
+        base = now.replace(minute=0, second=0, microsecond=0)
+        step = fallback_hours
+        nxt = ((base.hour // step) + 1) * step
+        day = 0
+        if nxt >= 24:
+            nxt -= 24
+            day = 1
+        target = (base + timedelta(days=day)).replace(hour=nxt)
+
     delta = target - now
-    total = max(0, int(delta.total_seconds()))
-    hh = total // 3600
-    mm = (total % 3600) // 60
-    ss = total % 60
+    sec = max(0, int(delta.total_seconds()))
+    hh = sec // 3600
+    mm = (sec % 3600) // 60
+    ss = sec % 60
     return f"{hh:02d}:{mm:02d}:{ss:02d}"
 
 
@@ -150,6 +168,7 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
         if quote.upper() != "USDT":
             continue
         fund = to_float(it.get("fundingRate"))
+        next_ts = _pick_ts(it, ["nextSettleTime", "nextFundingTime", "fundingTime"])
         out[normalize_usdt(base)] = MarketRow(
             exchange="MEXC",
             bid=to_float(it.get("bid1")),
@@ -159,6 +178,7 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund_rate=fund,
             fund24_est=funding_24h_estimate(fund),
             url=mexc_trade_url(symbol),
+            next_funding_ts=next_ts,
         )
     return out
 
@@ -177,6 +197,7 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
         if not symbol.endswith("USDT"):
             continue
         fund = to_float(it.get("fundingRate"))
+        next_ts = _pick_ts(it, ["nextFundingTime", "nextFundingTimestamp"])
         out[symbol] = MarketRow(
             exchange="Bybit",
             bid=to_float(it.get("bid1Price") or it.get("bidPrice")),
@@ -186,8 +207,24 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund_rate=fund,
             fund24_est=funding_24h_estimate(fund),
             url=bybit_trade_url(symbol),
+            next_funding_ts=next_ts,
         )
     return out
+
+
+async def _load_bingx_bulk(session: aiohttp.ClientSession) -> Tuple[Dict[str, dict], Dict[str, dict], Dict[str, dict]]:
+    book, ticker, prem = await asyncio.gather(
+        fetch_json(session, BINGX_BOOK_TICKER),
+        fetch_json(session, BINGX_TICKER_24H),
+        fetch_json(session, BINGX_PREMIUM_INDEX),
+        return_exceptions=True,
+    )
+    if any(isinstance(x, Exception) for x in (book, ticker, prem)):
+        return {}, {}, {}
+    b_map = {str(x.get("symbol")): x for x in _as_list(book) if x.get("symbol")}
+    t_map = {str(x.get("symbol")): x for x in _as_list(ticker) if x.get("symbol")}
+    p_map = {str(x.get("symbol")): x for x in _as_list(prem) if x.get("symbol")}
+    return b_map, t_map, p_map
 
 
 async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) -> Dict[str, MarketRow]:
@@ -205,35 +242,55 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
             norm_to_raw[normalize_usdt(base)] = raw
 
     chosen_norms = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
-    if not chosen_norms:
-        chosen_norms = list(norm_to_raw.keys())[:MAX_BINGX_SYMBOLS]
+    if len(chosen_norms) < min(60, len(norm_to_raw)):
+        seen = set(chosen_norms)
+        for sym in norm_to_raw.keys():
+            if sym in seen:
+                continue
+            chosen_norms.append(sym)
+            if len(chosen_norms) >= MAX_BINGX_SYMBOLS:
+                break
+
+    b_map, t_map, p_map = await _load_bingx_bulk(session)
 
     async def fetch_one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
         raw = norm_to_raw.get(norm_sym)
         if not raw:
             return None
         try:
-            book, tick, prem = await asyncio.gather(
-                fetch_json(session, BINGX_BOOK_TICKER, params={"symbol": raw}),
-                fetch_json(session, BINGX_TICKER_24H, params={"symbol": raw}),
-                fetch_json(session, BINGX_PREMIUM_INDEX, params={"symbol": raw}),
-                return_exceptions=True,
-            )
-            if any(isinstance(x, Exception) for x in (book, tick, prem)):
-                return None
-            b0 = _as_list(book)[0] if _as_list(book) else {}
-            t0 = _as_list(tick)[0] if _as_list(tick) else {}
-            p0 = _as_list(prem)[0] if _as_list(prem) else {}
+            book = b_map.get(raw)
+            tick = t_map.get(raw)
+            prem = p_map.get(raw)
 
-            bid = _pick_float(b0, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
-            ask = _pick_float(b0, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
-            last = _pick_float(t0, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
-            vol_quote = _pick_float(t0, ["quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H", "volumeQuote"])
-            vol_base = _pick_float(t0, ["volume", "baseVolume", "qty", "amount", "vol", "volume24h"])
-            vol = vol_quote
-            if not is_pos(vol):
-                vol = vol_base * last if is_pos(vol_base) and is_pos(last) else math.nan
-            fund = _pick_float(p0, ["fundingRate", "lastFundingRate", "funding"])
+            if not (book and tick and prem):
+                f_book, f_tick, f_prem = await asyncio.gather(
+                    fetch_json(session, BINGX_BOOK_TICKER, params={"symbol": raw}),
+                    fetch_json(session, BINGX_TICKER_24H, params={"symbol": raw}),
+                    fetch_json(session, BINGX_PREMIUM_INDEX, params={"symbol": raw}),
+                    return_exceptions=True,
+                )
+                if not isinstance(f_book, Exception):
+                    lst = _as_list(f_book)
+                    book = lst[0] if lst else book
+                if not isinstance(f_tick, Exception):
+                    lst = _as_list(f_tick)
+                    tick = lst[0] if lst else tick
+                if not isinstance(f_prem, Exception):
+                    lst = _as_list(f_prem)
+                    prem = lst[0] if lst else prem
+
+            book = book or {}
+            tick = tick or {}
+            prem = prem or {}
+
+            bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
+            ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
+            last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
+            vol_quote = _pick_float(tick, ["quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H", "volumeQuote"])
+            vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "amount", "vol", "volume24h"])
+            vol = vol_quote if is_pos(vol_quote) else (vol_base * last if is_pos(vol_base) and is_pos(last) else math.nan)
+            fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
+            next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"]) 
 
             return norm_sym, MarketRow(
                 exchange="BingX",
@@ -244,17 +301,18 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 fund_rate=fund,
                 fund24_est=funding_24h_estimate(fund),
                 url=bingx_trade_url(raw),
+                next_funding_ts=next_ts,
             )
         except Exception:
             return None
 
     sem = asyncio.Semaphore(BINGX_CONCURRENCY)
 
-    async def guarded_fetch(sym: str):
+    async def guarded(sym: str):
         async with sem:
             return await fetch_one(sym)
 
-    results = await asyncio.gather(*[guarded_fetch(sym) for sym in chosen_norms], return_exceptions=True)
+    results = await asyncio.gather(*[guarded(sym) for sym in chosen_norms], return_exceptions=True)
     for item in results:
         if isinstance(item, tuple):
             out[item[0]] = item[1]
@@ -297,12 +355,12 @@ def best_pair(rows: List[MarketRow], min_vol: float) -> Optional[Dict[str, Any]]
         "buy_funding24": buy.fund24_est,
         "sell_funding24": sell.fund24_est,
         "funding_spread": fund_spread,
-        "funding_eta": funding_eta(),
+        "funding_eta_buy": funding_eta_str(buy.next_funding_ts),
+        "funding_eta_sell": funding_eta_str(sell.next_funding_ts),
         "buy_vol": buy.vol24_usd,
         "sell_vol": sell.vol24_usd,
         "buy_url": buy.url,
         "sell_url": sell.url,
-        "pair_key": f"{buy.exchange}-{sell.exchange}",
     }
 
 
@@ -357,82 +415,116 @@ HTML_PAGE = r"""
   <title>Arbitrage Dashboard</title>
   <style>
     :root{
-      --bg:#101419; --card:#1c2229; --line:#2d353e; --text:#edf1f6; --muted:#9ca7b5; --accent:#69dd91;
-      --chip:#2a323c; --chipText:#f4f7fa; --danger:#ff7d7d; --good:#5ad87d;
+      --bg:#f0f0f2;
+      --panel:#e7e7ea;
+      --line:#d3d4d8;
+      --text:#1f2329;
+      --muted:#5e6673;
+      --chip:#ece5c5;
+      --chip-border:#ddd4aa;
+      --good:#68df8c;
+      --bad:#e15d5d;
+      --link:#1f2329;
     }
     body.theme-dark{
-      --bg:#081428; --card:#13223d; --line:#27416e; --text:#edf2ff; --muted:#8ea8cf; --accent:#6ca4ff;
-      --chip:#1a3158; --chipText:#eff5ff; --danger:#ff8a8a; --good:#5fe47f;
+      --bg:#0b1524;--panel:#12253d;--line:#254568;--text:#e9f1ff;--muted:#96afcd;--chip:#20395a;--chip-border:#315786;--good:#63de8b;--bad:#ff8686;--link:#e9f1ff;
     }
     body.theme-light{
-      --bg:#f2f4f7; --card:#ffffff; --line:#d9dee5; --text:#1b2430; --muted:#5c6a79; --accent:#21a864;
-      --chip:#eff3f8; --chipText:#27303a; --danger:#e06060; --good:#26b766;
+      --bg:#f7f8fa;--panel:#ffffff;--line:#d7dde4;--text:#1f2833;--muted:#62707e;--chip:#f4ecd1;--chip-border:#e6dcb6;--good:#53d778;--bad:#d95f5f;--link:#1f2833;
+    }
+    body.theme-classic{
+      --bg:#f0f0f2;--panel:#e7e7ea;--line:#d3d4d8;--text:#1f2329;--muted:#5e6673;--chip:#ece5c5;--chip-border:#ddd4aa;--good:#68df8c;--bad:#e15d5d;--link:#1f2329;
     }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif}
-    .wrap{max-width:1500px;margin:0 auto;padding:12px}
-    .toolbar{display:grid;grid-template-columns:1.1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
-    .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px}
-    .label{font-size:12px;color:var(--muted);margin-bottom:6px}
-    input,select{width:100%;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
-    .checklist{display:flex;gap:6px;flex-wrap:wrap}
-    .chip{border:1px solid var(--line);background:var(--chip);color:var(--chipText);padding:5px 8px;border-radius:999px;font-size:12px;display:flex;gap:6px;align-items:center}
-    .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:9px 12px;border-radius:8px;cursor:pointer}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;font-size:15px}
+    .wrap{max-width:1600px;margin:0 auto;padding:12px}
+
+    .filter-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px;margin-bottom:10px}
+    .filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+    .filter-title{font-size:18px;font-weight:700}
+    .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:8px 12px;border-radius:10px;font-size:15px;cursor:pointer}
     .btn[disabled]{opacity:.45;cursor:not-allowed}
-    .meta{margin:8px 0 10px;display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
-    .badge{padding:4px 8px;border-radius:999px;border:1px solid var(--line);background:var(--card)}
-    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
-    table{width:100%;border-collapse:collapse;font-size:14px;min-width:1300px}
-    th,td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
-    th{position:sticky;top:0;background:var(--card);text-align:left}
-    tr:hover{background:rgba(120,130,150,.08)}
-    .symbol{font-weight:800;font-size:30px;line-height:1}
-    .fav{cursor:pointer;font-size:18px}
-    .pinned{background:rgba(248,219,97,.18)!important}
-    .buy{color:var(--good);font-weight:700}
-    .sell{color:var(--danger);font-weight:700}
-    .spread{font-weight:800;padding:4px 8px;background:#74e48f;color:#11331f;border-radius:8px;display:inline-block}
+
+    .filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
+    .lbl{font-size:14px;color:var(--muted);margin-bottom:6px;font-weight:600}
+    input,select{width:100%;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 10px;font-size:15px}
+
+    .chips{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{display:inline-flex;align-items:center;gap:8px;background:var(--chip);border:1px solid var(--chip-border);padding:6px 10px;border-radius:12px;font-size:16px;font-weight:600}
+    .chip.off{opacity:.45}
+    .chip img{width:22px;height:22px;object-fit:contain;border-radius:6px}
+
+    .meta{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px}
+    .badge{border:1px solid var(--line);background:var(--panel);padding:6px 10px;border-radius:999px;font-size:13px;color:var(--muted)}
+
+    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+    table{width:100%;border-collapse:collapse;min-width:1400px}
+    th,td{padding:10px 10px;border-bottom:1px solid var(--line);font-size:15px}
+    th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:14px;font-weight:700}
+    th.sortable{cursor:pointer;user-select:none}
+    th.sortable .arr{opacity:.7;margin-left:6px;font-size:12px}
+    tr:hover{background:rgba(125,130,140,.09)}
+    .pinned{background:rgba(241,210,66,.16)!important}
+
+    .fav{font-size:19px;cursor:pointer}
+    .token{font-size:30px;font-weight:800;line-height:1}
+    .pair-line{display:flex;align-items:center;gap:8px;margin:2px 0}
+    .long{color:var(--good);font-weight:700}
+    .short{color:var(--bad);font-weight:700}
+    .xlogo{width:22px;height:22px;object-fit:contain;border-radius:99px;background:transparent}
+    a{color:var(--link);text-decoration:none}
+    a:hover{text-decoration:underline}
     .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
-    .logo{display:inline-flex;min-width:18px;justify-content:center}
-    .fund-time{color:var(--muted);font-size:12px}
-    @media(max-width:1300px){.toolbar{grid-template-columns:1fr 1fr 1fr}}
-    @media(max-width:780px){.toolbar{grid-template-columns:1fr 1fr}}
-    @media(max-width:560px){.toolbar{grid-template-columns:1fr}}
+    .spread-pill{display:inline-block;background:var(--good);padding:4px 8px;border-radius:8px;font-weight:800;color:#0f2817}
+
+    @media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}
+    @media(max-width:760px){.filter-grid{grid-template-columns:1fr 1fr}}
+    @media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
   </style>
 </head>
-<body class="theme-dark">
+<body class="theme-classic">
 <div class="wrap">
-  <div class="toolbar">
-    <div class="panel">
-      <div class="label">Поиск (с начала символа)</div>
-      <input id="q" placeholder="BTC" />
+  <div class="filter-card">
+    <div class="filter-head">
+      <div class="filter-title">Фильтр</div>
+      <button class="btn" id="clearFiltersBtn">Очистить фильтр</button>
     </div>
-    <div class="panel">
-      <div class="label">Min Volume 24h (USD)</div>
-      <input id="minVol" type="number" min="0" step="100000" />
-    </div>
-    <div class="panel">
-      <div class="label">Min Spread (%)</div>
-      <input id="minSpread" type="number" min="0" step="0.01" />
-    </div>
-    <div class="panel">
-      <div class="label">Биржи в поиске</div>
-      <div class="checklist" id="exchangeBox"></div>
-    </div>
-    <div class="panel">
-      <div class="label">Тема и звук</div>
-      <div style="display:flex;gap:8px">
+    <div class="filter-grid">
+      <div>
+        <div class="lbl">Поиск по началу токена</div>
+        <input id="q" placeholder="BTC" />
+      </div>
+      <div>
+        <div class="lbl">Оборот 24h (USD)</div>
+        <input id="minVol" type="number" min="0" step="100000" />
+      </div>
+      <div>
+        <div class="lbl">OpenSpread, %</div>
+        <input id="minSpread" type="number" min="0" step="0.01" />
+      </div>
+      <div>
+        <div class="lbl">Тема</div>
         <select id="themeSel">
           <option value="theme-dark">Dark Blue</option>
           <option value="theme-light">Light</option>
           <option value="theme-classic">Classic Gray</option>
         </select>
-        <label class="chip"><input type="checkbox" id="soundToggle" /> sound</label>
+      </div>
+      <div>
+        <div class="lbl">Оповещение</div>
+        <label class="chip"><input type="checkbox" id="soundToggle" /> звук</label>
+      </div>
+      <div>
+        <button class="btn" id="refreshBtn">↻ Refresh</button>
       </div>
     </div>
-    <div>
-      <button class="btn" id="refreshBtn">↻ Refresh now</button>
+
+    <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+      <div class="lbl" style="margin:0">Биржи</div>
+      <button class="btn" id="clearExBtn">Очистить</button>
     </div>
+    <div class="chips" id="exchangeBox"></div>
   </div>
 
   <div class="meta">
@@ -448,25 +540,41 @@ HTML_PAGE = r"""
           <th>Fav</th>
           <th>Токен</th>
           <th>Покупка / Продажа</th>
-          <th>Prices</th>
-          <th>Funding buy/sell</th>
-          <th>Funding spread</th>
+          <th class="sortable" data-sort="buy_ask">Buy Ask<span class="arr"></span></th>
+          <th class="sortable" data-sort="sell_bid">Sell Bid<span class="arr"></span></th>
+          <th class="sortable" data-sort="buy_funding">Fund Buy<span class="arr"></span></th>
+          <th class="sortable" data-sort="sell_funding">Fund Sell<span class="arr"></span></th>
+          <th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th>
           <th>Funding calc in</th>
-          <th>Spread</th>
-          <th>Volume 24h</th>
+          <th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th>
+          <th class="sortable" data-sort="buy_vol">Buy Vol<span class="arr"></span></th>
+          <th class="sortable" data-sort="sell_vol">Sell Vol<span class="arr"></span></th>
         </tr>
       </thead>
-      <tbody id="tbody"><tr><td colspan="9">Загрузка...</td></tr></tbody>
+      <tbody id="tbody"><tr><td colspan="12">Загрузка...</td></tr></tbody>
     </table>
   </div>
 </div>
 <script>
-const EXCHANGE_LOGO={MEXC:'🟦',Bybit:'🟠',BingX:'🔵'};
 const REFRESH_COOLDOWN_SEC=8;
+const EXCHANGE_LOGO={
+  'MEXC':'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" rx="8" fill="white"/><path d="M10 45l13-23c3-5 10-5 13 0l13 23c2 4-1 9-6 9H16c-5 0-8-5-6-9z" fill="%231b4ae8"/><path d="M34 17c3-5 10-5 13 0l10 18c2 4 1 9-4 11l-16-27z" fill="%23255df3"/></svg>',
+  'Bybit':'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="31" fill="%2318192d"/><text x="17" y="39" font-size="17" fill="white" font-family="Arial" font-weight="700">BYB</text><rect x="40" y="17" width="5" height="30" fill="%23f3b735"/><text x="46" y="39" font-size="17" fill="white" font-family="Arial" font-weight="700">T</text></svg>',
+  'BingX':'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="31" fill="%231d63f0"/><path d="M18 24c5-8 13-8 20 0l8 12c3 4 2 8-3 8h-5l-9-13c-3-4-5-4-8 0h-6c0-2 1-4 3-7z" fill="white"/><path d="M46 24c-4-7-12-8-19-1l-9 11h8l5-6c3-3 5-3 8 1l6 9h7c3 0 4-4 2-7z" fill="%23dce5ff"/></svg>'
+};
+
 let lastAlertKey='';
 let cooldown=0;
 let timerId=null;
-let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-dark',sound:(localStorage.getItem('soundOn')||'0')==='1'};
+let STATE={
+  config:null,
+  data:null,
+  pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),
+  theme:localStorage.getItem('theme')||'theme-classic',
+  sound:(localStorage.getItem('soundOn')||'0')==='1',
+  sortKey:'spread',
+  sortDir:'desc'
+};
 
 const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
 const fmtUsd=x=>!Number.isFinite(x)?'N/A':(x>=1e9?(x/1e9).toFixed(2)+'b$':x>=1e6?(x/1e6).toFixed(2)+'m$':x>=1e3?(x/1e3).toFixed(1)+'k$':Math.round(x)+'$');
@@ -478,9 +586,9 @@ function playSmsBeep(){
     const osc=ac.createOscillator();
     const gain=ac.createGain();
     osc.type='triangle';
-    osc.frequency.value=880;
+    osc.frequency.value=900;
     gain.gain.setValueAtTime(0.0001,ac.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.20,ac.currentTime+0.01);
+    gain.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14);
     osc.connect(gain); gain.connect(ac.destination); osc.start(); osc.stop(ac.currentTime+0.15);
   }catch(_e){}
@@ -502,7 +610,7 @@ function setCooldown(sec){
   timerId=setInterval(()=>{
     cooldown=Math.max(0,cooldown-1);
     btn.disabled=cooldown>0;
-    btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh now';
+    btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh';
     document.getElementById('cooldownBadge').textContent=`Manual refresh cooldown: ${cooldown}s`;
     if(cooldown===0){clearInterval(timerId);timerId=null;}
   },1000);
@@ -514,9 +622,9 @@ function renderExchangeFilters(){
   const box=document.getElementById('exchangeBox'); box.innerHTML='';
   ['MEXC','Bybit','BingX'].forEach(ex=>{
     const chip=document.createElement('label');
-    chip.className='chip';
     const checked=!!STATE.config.enabled?.[ex];
-    chip.innerHTML=`<input type="checkbox" ${checked?'checked':''}/> ${EXCHANGE_LOGO[ex]||'◉'} ${ex}`;
+    chip.className='chip'+(checked?'':' off');
+    chip.innerHTML=`<input type="checkbox" ${checked?'checked':''}/> <img src="${EXCHANGE_LOGO[ex]}" alt="${ex}"/> ${ex}`;
     chip.addEventListener('click', async (e)=>{
       e.preventDefault();
       const enabled={...(STATE.config.enabled||{})};
@@ -527,6 +635,21 @@ function renderExchangeFilters(){
     });
     box.appendChild(chip);
   });
+}
+
+function clearExchangeFilters(){
+  STATE.config.enabled={MEXC:true,Bybit:true,BingX:true};
+  apiPost('/api/config',{enabled:STATE.config.enabled}).then(async (cfg)=>{STATE.config=cfg; renderExchangeFilters(); await refreshData();});
+}
+
+function clearAllFilters(){
+  document.getElementById('q').value='';
+  document.getElementById('minVol').value='0';
+  document.getElementById('minSpread').value='0';
+  STATE.config.min_vol=0;
+  STATE.config.min_spread=0;
+  STATE.config.enabled={MEXC:true,Bybit:true,BingX:true};
+  apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async (cfg)=>{STATE.config=cfg; renderExchangeFilters(); await refreshData();});
 }
 
 function isPinned(symbol){ return STATE.pinned.has(symbol); }
@@ -551,6 +674,21 @@ function applyFilters(rows){
   });
 }
 
+function sortRows(rows){
+  const key=STATE.sortKey;
+  const dir=STATE.sortDir==='asc'?1:-1;
+  rows.sort((a,b)=>{
+    const pa=isPinned(a.symbol)?1:0;
+    const pb=isPinned(b.symbol)?1:0;
+    if(pa!==pb) return pb-pa;
+    const va=Number.isFinite(a[key])?a[key]:-Infinity;
+    const vb=Number.isFinite(b[key])?b[key]:-Infinity;
+    if(va<vb) return -1*dir;
+    if(va>vb) return 1*dir;
+    return 0;
+  });
+}
+
 function maybePlayAlert(rows){
   if(!STATE.sound || !rows.length) return;
   const top=rows[0];
@@ -561,25 +699,28 @@ function maybePlayAlert(rows){
   }
 }
 
+function refreshSortIndicators(){
+  document.querySelectorAll('th.sortable').forEach(th=>{
+    const arr=th.querySelector('.arr');
+    const key=th.getAttribute('data-sort');
+    arr.textContent = (key===STATE.sortKey) ? (STATE.sortDir==='asc'?'▲':'▼') : '↕';
+  });
+}
+
 function render(){
   if(!STATE.data) return;
   document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
   document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`;
 
   let rows=applyFilters([...(STATE.data.rows||[])]);
-  rows.sort((a,b)=>{
-    const pa=isPinned(a.symbol)?1:0;
-    const pb=isPinned(b.symbol)?1:0;
-    if(pa!==pb) return pb-pa;
-    return (b.spread||0)-(a.spread||0);
-  });
-
+  sortRows(rows);
+  refreshSortIndicators();
   maybePlayAlert(rows);
 
   const tbody=document.getElementById('tbody');
   tbody.innerHTML='';
   if(!rows.length){
-    tbody.innerHTML='<tr><td colspan="9">Ничего не найдено по фильтрам.</td></tr>';
+    tbody.innerHTML='<tr><td colspan="12">Ничего не найдено по фильтрам.</td></tr>';
     return;
   }
 
@@ -588,27 +729,21 @@ function render(){
     const tr=document.createElement('tr');
     if(pinned) tr.classList.add('pinned');
     tr.innerHTML=`
-      <td><span class="fav" title="pin/unpin">${pinned?'★':'☆'}</span></td>
-      <td class="symbol">${r.symbol.replace('USDT','')}</td>
+      <td><span class="fav">${pinned?'★':'☆'}</span></td>
+      <td class="token">${r.symbol.replace('USDT','')}</td>
       <td>
-        <div class="buy">⬆ LONG <span class="logo">${EXCHANGE_LOGO[r.buy_ex]||'◉'}</span> <a href="${r.buy_url}" target="_blank">${r.buy_ex}</a></div>
-        <div class="sell">⬇ SHORT <span class="logo">${EXCHANGE_LOGO[r.sell_ex]||'◉'}</span> <a href="${r.sell_url}" target="_blank">${r.sell_ex}</a></div>
+        <div class="pair-line long">⬆ LONG <img class="xlogo" src="${EXCHANGE_LOGO[r.buy_ex]}" alt="${r.buy_ex}"/> <a href="${r.buy_url}" target="_blank">${r.buy_ex}</a></div>
+        <div class="pair-line short">⬇ SHORT <img class="xlogo" src="${EXCHANGE_LOGO[r.sell_ex]}" alt="${r.sell_ex}"/> <a href="${r.sell_url}" target="_blank">${r.sell_ex}</a></div>
       </td>
-      <td class="mono">
-        <div>${fmtPrice(r.buy_ask)}</div>
-        <div>${fmtPrice(r.sell_bid)}</div>
-      </td>
-      <td class="mono">
-        <div>${fmtPct(r.buy_funding,3)}</div>
-        <div>${fmtPct(r.sell_funding,3)}</div>
-      </td>
+      <td class="mono">${fmtPrice(r.buy_ask)}</td>
+      <td class="mono">${fmtPrice(r.sell_bid)}</td>
+      <td class="mono">${fmtPct(r.buy_funding,3)}</td>
+      <td class="mono">${fmtPct(r.sell_funding,3)}</td>
       <td class="mono">${fmtPct(r.funding_spread,3)}</td>
-      <td>
-        <div class="mono">${r.funding_eta||'--:--:--'}</div>
-        <div class="fund-time">до next funding</div>
-      </td>
-      <td><span class="spread">${fmtPct(r.spread,2)}</span></td>
-      <td class="mono"><div>${fmtUsd(r.buy_vol)}</div><div>${fmtUsd(r.sell_vol)}</div></td>
+      <td class="mono"><div>${r.funding_eta_buy||'--:--:--'}</div><div>${r.funding_eta_sell||'--:--:--'}</div></td>
+      <td><span class="spread-pill">${fmtPct(r.spread,2)}</span></td>
+      <td class="mono">${fmtUsd(r.buy_vol)}</td>
+      <td class="mono">${fmtUsd(r.sell_vol)}</td>
     `;
     tr.querySelector('.fav').addEventListener('click',()=>togglePinned(r.symbol));
     tbody.appendChild(tr);
@@ -648,6 +783,7 @@ async function boot(){
     STATE.theme=e.target.value;
     applyTheme();
   });
+
   document.getElementById('soundToggle').addEventListener('change', e=>{
     STATE.sound=!!e.target.checked;
     localStorage.setItem('soundOn',STATE.sound?'1':'0');
@@ -659,6 +795,22 @@ async function boot(){
     setCooldown(REFRESH_COOLDOWN_SEC);
     await apiPost('/api/refresh',{});
     await refreshData();
+  });
+
+  document.getElementById('clearFiltersBtn').addEventListener('click', clearAllFilters);
+  document.getElementById('clearExBtn').addEventListener('click', clearExchangeFilters);
+
+  document.querySelectorAll('th.sortable').forEach(th=>{
+    th.addEventListener('click',()=>{
+      const key=th.getAttribute('data-sort');
+      if(STATE.sortKey===key){
+        STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';
+      }else{
+        STATE.sortKey=key;
+        STATE.sortDir='desc';
+      }
+      render();
+    });
   });
 
   setInterval(refreshData, Math.max(1000,(STATE.config.refresh_sec||5)*1000));
