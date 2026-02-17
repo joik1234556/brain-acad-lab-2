@@ -102,6 +102,7 @@ class MarketRow:
     fund24_est: float
     url: str
     next_funding_ts: float
+    funding_interval_h: int
 
 
 def ensure_assets() -> None:
@@ -216,6 +217,25 @@ def _pick_ts(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
+def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
+    for key in keys:
+        raw = d.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            txt = raw.strip().lower().replace("hours", "h").replace("hour", "h")
+            if txt.endswith("h"):
+                txt = txt[:-1]
+            val = to_float(txt)
+        else:
+            val = to_float(raw)
+        if math.isfinite(val) and val > 0:
+            if val > 24 and val % 60 == 0:
+                val = val / 60.0
+            return max(1, int(round(val)))
+    return default
+
+
 def funding_eta_str(next_ts: float, fallback_hours: int = 8) -> str:
     now = datetime.now(timezone.utc)
     if math.isfinite(next_ts) and next_ts > time.time():
@@ -265,6 +285,7 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund24_est=funding_24h_estimate(fund),
             url=mexc_trade_url(symbol),
             next_funding_ts=next_ts,
+            funding_interval_h=_pick_int(it, ["fundingInterval", "settleInterval", "collectCycle"], default=8),
         )
     return out
 
@@ -294,6 +315,7 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund24_est=funding_24h_estimate(fund),
             url=bybit_trade_url(symbol),
             next_funding_ts=next_ts,
+            funding_interval_h=_pick_int(it, ["fundingIntervalHour", "fundingInterval", "fundingIntervalHours"], default=8),
         )
     return out
 
@@ -334,18 +356,33 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         if not raw:
             return None
         contract = contract_by_raw.get(raw, {})
+
+        async def fetch_symbol(url: str) -> dict:
+            variants = [raw]
+            compact = raw.replace("-", "")
+            undersc = raw.replace("-", "_")
+            for v in (compact, undersc):
+                if v not in variants:
+                    variants.append(v)
+            for sym in variants:
+                resp = await fetch_json(session, url, params={"symbol": sym})
+                lst = _as_list(resp)
+                if lst:
+                    return lst[0]
+            return {}
+
         try:
             async with sem:
                 fb, ft, fp = await asyncio.gather(
-                    fetch_json(session, BINGX_BOOK_TICKER, params={"symbol": raw}),
-                    fetch_json(session, BINGX_TICKER_24H, params={"symbol": raw}),
-                    fetch_json(session, BINGX_PREMIUM_INDEX, params={"symbol": raw}),
+                    fetch_symbol(BINGX_BOOK_TICKER),
+                    fetch_symbol(BINGX_TICKER_24H),
+                    fetch_symbol(BINGX_PREMIUM_INDEX),
                     return_exceptions=True,
                 )
 
-            book = _as_list(fb)[0] if not isinstance(fb, Exception) and _as_list(fb) else {}
-            tick = _as_list(ft)[0] if not isinstance(ft, Exception) and _as_list(ft) else {}
-            prem = _as_list(fp)[0] if not isinstance(fp, Exception) and _as_list(fp) else {}
+            book = fb if isinstance(fb, dict) else {}
+            tick = ft if isinstance(ft, dict) else {}
+            prem = fp if isinstance(fp, dict) else {}
 
             bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
             ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
@@ -380,6 +417,11 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 fund24_est=funding_24h_estimate(fund),
                 url=bingx_trade_url(raw),
                 next_funding_ts=next_ts,
+                funding_interval_h=_pick_int(
+                    prem if prem else contract,
+                    ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"],
+                    default=8,
+                ),
             )
         except Exception:
             return None
@@ -425,8 +467,10 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "buy_funding": buy.fund_rate,
                 "sell_funding": sell.fund_rate,
                 "funding_spread": fund_spread,
-                "funding_eta_buy": funding_eta_str(buy.next_funding_ts),
-                "funding_eta_sell": funding_eta_str(sell.next_funding_ts),
+                "funding_eta_buy": funding_eta_str(buy.next_funding_ts, fallback_hours=buy.funding_interval_h),
+                "funding_eta_sell": funding_eta_str(sell.next_funding_ts, fallback_hours=sell.funding_interval_h),
+                "buy_funding_interval": f"{buy.funding_interval_h}h",
+                "sell_funding_interval": f"{sell.funding_interval_h}h",
                 "buy_vol": buy.vol24_usd,
                 "sell_vol": sell.vol24_usd,
                 "buy_url": buy.url,
@@ -647,11 +691,24 @@ async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await
 function renderAuth(){
   const u=STATE.user;
   const adminBox=document.getElementById('adminBox');
+  const bLogin=document.getElementById('btnLogin');
+  const bReg=document.getElementById('btnRegister');
+  const bOut=document.getElementById('btnLogout');
   const lim=STATE.data&&STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit)?`до ${(STATE.data.access.spread_limit*100).toFixed(0)}%`:'';
-  if(!u){setAuthStateText(`Гость: доступ ${lim||'до 2% спреда'}`); adminBox.style.display='none'; return;}
+  if(!u){
+    setAuthStateText(`Гость: доступ ${lim||'до 2% спреда'}`);
+    adminBox.style.display='none';
+    bLogin.style.display='inline-block';
+    bReg.style.display='inline-block';
+    bOut.style.display='none';
+    return;
+  }
   const status=u.is_admin?'admin (без лимита)':(u.subscription_approved?'подписка активна (без лимита)':'без подписки (до 2%)');
   setAuthStateText(`Пользователь: ${u.username} • ${status}`);
   adminBox.style.display=u.is_admin?'block':'none';
+  bLogin.style.display='none';
+  bReg.style.display='none';
+  bOut.style.display='inline-block';
 }
 async function loadUsersAdmin(){
   const r=await apiGet('/api/admin/users');
@@ -712,7 +769,7 @@ rows.forEach(r=>{
       <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
     </td>
     ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid))}
-    ${split(fmtPct(r.buy_funding,3),fmtPct(r.sell_funding,3))}
+    ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`)}
     ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--')}
     <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
     <td><span class='spread-pill'>${fmtPct(r.spread,2)}</span></td>
