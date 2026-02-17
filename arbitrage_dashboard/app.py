@@ -2,10 +2,8 @@ import asyncio
 import json
 import math
 import os
-import struct
 import sys
 import time
-import wave
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -83,22 +81,6 @@ def ensure_assets() -> None:
         with open(sounds_readme, "w", encoding="utf-8") as f:
             f.write("Put notification sounds here (wav/mp3/ogg), e.g. sms.wav\n")
 
-    sms = os.path.join(SOUNDS_DIR, "sms.wav")
-    if not os.path.exists(sms):
-        fr = 44100
-        duration = 0.16
-        freq = 960.0
-        n = int(fr * duration)
-        with wave.open(sms, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(fr)
-            for i in range(n):
-                t = i / fr
-                env = max(0.0, 1.0 - (t / duration))
-                s = int(20000 * env * math.sin(2 * math.pi * freq * t))
-                wf.writeframes(struct.pack("<h", s))
-
 
 def find_logo(exchange: str) -> str:
     base = exchange.lower()
@@ -111,6 +93,8 @@ def find_logo(exchange: str) -> str:
 
 def list_sounds() -> List[str]:
     out: List[str] = []
+    if not os.path.isdir(SOUNDS_DIR):
+        return out
     for name in sorted(os.listdir(SOUNDS_DIR)):
         if name.lower().endswith((".wav", ".mp3", ".ogg")):
             out.append(name)

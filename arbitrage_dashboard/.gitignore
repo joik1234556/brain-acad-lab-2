@@ -5,3 +5,9 @@ assets/sounds/*
 # Keep folder docs
 !assets/logos/README.txt
 !assets/sounds/README.txt
+
+# Local runtime and virtualenv artifacts
+.venv/
+__pycache__/
+*.pyc
+arb_dashboard_config.json
