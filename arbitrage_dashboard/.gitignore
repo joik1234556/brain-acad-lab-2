@@ -11,3 +11,5 @@ assets/sounds/*
 __pycache__/
 *.pyc
 arb_dashboard_config.json
+users.db.enc
+auth_secret.key

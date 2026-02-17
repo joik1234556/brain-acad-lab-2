@@ -1,7 +1,10 @@
 import asyncio
+import base64
 import json
+import hashlib
 import math
 import os
+import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -10,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
-from fastapi import FastAPI
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -33,6 +39,8 @@ ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 LOGOS_DIR = os.path.join(ASSETS_DIR, "logos")
 SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
+AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
+USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
 DEFAULT_REFRESH_SEC = 5
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
@@ -40,6 +48,8 @@ HTTP_TIMEOUT = 12
 MAX_BINGX_SYMBOLS = 260
 BINGX_CONCURRENCY = 18
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
+MAX_FREE_SPREAD = 0.02
+SESSION_TTL_SEC = 7 * 24 * 3600
 
 MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
@@ -47,6 +57,38 @@ BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 BINGX_BOOK_TICKER = "https://open-api.bingx.com/openApi/swap/v2/quote/bookTicker"
 BINGX_TICKER_24H = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 BINGX_PREMIUM_INDEX = "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex"
+
+
+def _get_or_create_auth_key() -> bytes:
+    env_key = os.environ.get("ARB_AUTH_KEY")
+    if env_key:
+        return env_key.encode("utf-8")
+    if os.path.exists(AUTH_KEY_PATH):
+        with open(AUTH_KEY_PATH, "rb") as fh:
+            return fh.read().strip()
+    key = Fernet.generate_key()
+    with open(AUTH_KEY_PATH, "wb") as fh:
+        fh.write(key)
+    return key
+
+
+def _hash_password(password: str, salt_b64: str) -> str:
+    salt = base64.b64decode(salt_b64.encode("utf-8"))
+    raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 250_000)
+    return base64.b64encode(raw).decode("utf-8")
+
+
+def _make_password_record(password: str) -> Tuple[str, str]:
+    salt_b64 = base64.b64encode(secrets.token_bytes(16)).decode("utf-8")
+    return salt_b64, _hash_password(password, salt_b64)
+
+
+def _verify_password(password: str, salt_b64: str, expected_hash: str) -> bool:
+    return secrets.compare_digest(_hash_password(password, salt_b64), expected_hash)
+
+
+def _normalize_username(username: str) -> str:
+    return "".join(ch for ch in (username or "").strip().lower() if ch.isalnum() or ch in "._-")[:32]
 
 
 @dataclass
@@ -470,6 +512,87 @@ def save_config(cfg: Dict[str, Any]) -> None:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
 
+AUTH_CIPHER = Fernet(_get_or_create_auth_key())
+RSA_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+RSA_PUBLIC_PEM = RSA_PRIVATE_KEY.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+).decode("utf-8")
+
+
+def _save_users(users: Dict[str, Any]) -> None:
+    raw = json.dumps(users, ensure_ascii=False).encode("utf-8")
+    token = AUTH_CIPHER.encrypt(raw)
+    with open(USERS_DB_PATH, "wb") as fh:
+        fh.write(token)
+
+
+def _seed_admin(users: Dict[str, Any]) -> None:
+    if "admin" in users:
+        return
+    salt, pwh = _make_password_record("salimonenkodima")
+    users["admin"] = {
+        "username": "admin",
+        "salt": salt,
+        "password_hash": pwh,
+        "is_admin": True,
+        "subscription_approved": True,
+        "created_at": int(time.time()),
+    }
+
+
+def _load_users() -> Dict[str, Any]:
+    users: Dict[str, Any] = {}
+    if os.path.exists(USERS_DB_PATH):
+        try:
+            with open(USERS_DB_PATH, "rb") as fh:
+                users = json.loads(AUTH_CIPHER.decrypt(fh.read()).decode("utf-8"))
+        except Exception:
+            users = {}
+    _seed_admin(users)
+    _save_users(users)
+    return users
+
+
+def _decrypt_client_field(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    decoded = base64.b64decode(value.encode("utf-8"))
+    plain = RSA_PRIVATE_KEY.decrypt(
+        decoded,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    return plain.decode("utf-8")
+
+
+USERS = _load_users()
+USERS_LOCK = asyncio.Lock()
+SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+
+def _make_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = {"username": username, "expires": time.time() + SESSION_TTL_SEC}
+    return token
+
+
+def _session_user(request: Request) -> Optional[Dict[str, Any]]:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:]
+    rec = SESSIONS.get(token)
+    if not rec:
+        return None
+    if rec["expires"] < time.time():
+        SESSIONS.pop(token, None)
+        return None
+    user = USERS.get(rec["username"])
+    if not user:
+        return None
+    return user
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     asyncio.create_task(updater_loop())
@@ -509,6 +632,10 @@ tr:hover{background:rgba(120,130,150,.1)} .pinned{background:rgba(239,208,70,.16
 .token{font-size:28px;font-weight:800;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;padding:2px 0}.pair-line + .pair-line{border-top:1px solid var(--line);margin-top:3px;padding-top:5px}
 .long{color:var(--good);font-weight:700}.short{color:var(--bad);font-weight:700}.xlogo{width:20px;height:20px;object-fit:contain;border-radius:99px}
 .split-cell{padding:0!important}.split-cell .line{padding:8px 10px;line-height:1.25}.split-cell .line + .line{border-top:1px solid var(--line)}
+.auth-wrap{margin:8px 0 10px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.auth-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.auth-row input{max-width:220px}
+.small{font-size:12px;color:var(--muted)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .spread-pill{display:inline-block;background:var(--good);padding:3px 8px;border-radius:8px;font-weight:800;color:#0f2817}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
 @media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
@@ -517,21 +644,54 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 <div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск по началу токена</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="number" min="0" step="0.01"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="clearExBtn">Очистить</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
+<div class="auth-wrap"><div class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: доступ до 2% спреда</span></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th></tr></thead><tbody id="tbody"><tr><td colspan="9">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
-let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc'};
+let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:''};
 const I18N={ru:{filterTitle:'Фильтр',search:'Поиск по началу токена',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
 const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
 const fmtUsd=x=>!Number.isFinite(x)?'N/A':(x>=1e9?(x/1e9).toFixed(2)+'b$':x>=1e6?(x/1e6).toFixed(2)+'m$':x>=1e3?(x/1e3).toFixed(1)+'k$':Math.round(x)+'$');
 const fmtPrice=x=>Number.isFinite(x)?x.toFixed(Math.abs(x)>=1?6:10).replace(/0+$/,'').replace(/\.$/,''):'N/A';
-const apiGet=async p=>(await fetch(p,{cache:'no-store'})).json();
-const apiPost=async(p,b)=>(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();
+function authHeaders(base={}){if(STATE.token)base['Authorization']=`Bearer ${STATE.token}`; return base;}
+const apiGet=async p=>(await fetch(p,{cache:'no-store',headers:authHeaders({})})).json();
+const apiPost=async(p,b)=>(await fetch(p,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(b)})).json();
+
+function b64(arr){let s=''; const bytes=new Uint8Array(arr); for(const b of bytes)s+=String.fromCharCode(b); return btoa(s);}
+async function ensurePubKey(){if(STATE.publicKey)return STATE.publicKey; const j=await (await fetch('/api/auth/pubkey',{cache:'no-store'})).json(); STATE.publicKey=j.public_key||''; return STATE.publicKey;}
+async function encryptWithPub(plain){
+  const pem=await ensurePubKey();
+  const clean=pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g,'');
+  const der=Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
+  const key=await crypto.subtle.importKey('spki',der.buffer,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+  const enc=await crypto.subtle.encrypt({name:'RSA-OAEP'},key,new TextEncoder().encode(plain));
+  return b64(enc);
+}
+function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/register',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown'));}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/login',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); if(!r.ok){setAuthStateText('Ошибка входа'); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; await refreshData(); renderAuth();}
+async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); await refreshData(); renderAuth();}
+async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
+function renderAuth(){
+  const u=STATE.user;
+  const adminBox=document.getElementById('adminBox');
+  if(!u){setAuthStateText('Гость: доступ до 2% спреда'); adminBox.style.display='none'; return;}
+  const status=u.is_admin?'admin (без лимита)':(u.subscription_approved?'подписка активна (без лимита)':'без подписки (до 2%)');
+  setAuthStateText(`Пользователь: ${u.username} • ${status}`);
+  adminBox.style.display=u.is_admin?'block':'none';
+}
+async function loadUsersAdmin(){
+  const r=await apiGet('/api/admin/users');
+  if(!r.ok){document.getElementById('adminUsers').textContent='Нет доступа'; return;}
+  const box=document.getElementById('adminUsers');
+  box.innerHTML='';
+  r.users.forEach(x=>{const row=document.createElement('div'); row.style.margin='4px 0'; const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?'Отключить подписку':'Подтвердить подписку'; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.textContent=`${x.username} ${x.is_admin?'(admin)':''} ${x.subscription_approved?'✅':'⏳'} `; if(!x.is_admin)row.appendChild(btn); box.appendChild(row);});
+}
 
 function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase().replace(',', '.').replace('м','m'); if(!s) return 0; const m=s.match(/^([0-9]+(?:\.[0-9]+)?)([kmb])?$/i); if(!m) return parseFloat(s)||0; const v=parseFloat(m[1]); const suf=(m[2]||'').toLowerCase(); if(suf==='k') return v*1e3; if(suf==='m') return v*1e6; if(suf==='b') return v*1e9; return v;}
 
@@ -595,7 +755,7 @@ rows.forEach(r=>{
 
 async function refreshData(){STATE.data=await apiGet('/api/data'); render();}
 
-async function boot(){STATE.config=await apiGet('/api/config'); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100); document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang();
+async function boot(){STATE.config=await apiGet('/api/config'); await loadMe(); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100); document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang(); renderAuth();
 const ss=document.getElementById('soundSel'); ss.innerHTML=''; (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);}); if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} renderExchangeFilters(); render();
 
 document.getElementById('q').addEventListener('input',render);
@@ -607,6 +767,7 @@ document.getElementById('soundToggle').addEventListener('change',e=>{STATE.sound
 document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
 document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); await apiPost('/api/refresh',{}); await refreshData();});
 document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters); document.getElementById('clearExBtn').addEventListener('click',clearExchangeFilters);
+document.getElementById('btnRegister').addEventListener('click',registerUser); document.getElementById('btnLogin').addEventListener('click',loginUser); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
 document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
 setInterval(refreshData,Math.max(1000,(STATE.config.refresh_sec||5)*1000)); }
 boot();
@@ -715,9 +876,23 @@ async def api_assets():
 
 
 @app.get("/api/data")
-async def api_data():
+async def api_data(request: Request):
+    user = _session_user(request)
+    is_admin = bool(user and user.get("is_admin"))
+    is_paid = bool(user and user.get("subscription_approved"))
     async with CACHE_LOCK:
-        return JSONResponse(CACHE)
+        data = dict(CACHE)
+        rows = list(CACHE.get("rows", []))
+    if not (is_admin or is_paid):
+        rows = [r for r in rows if float(r.get("spread") or 0.0) <= MAX_FREE_SPREAD]
+    data["rows"] = rows
+    data["access"] = {
+        "username": user.get("username") if user else None,
+        "is_admin": is_admin,
+        "subscription_approved": is_paid,
+        "spread_limit": None if (is_admin or is_paid) else MAX_FREE_SPREAD,
+    }
+    return JSONResponse(data)
 
 
 @app.post("/api/refresh")
@@ -725,6 +900,123 @@ async def api_refresh():
     data = await compute_once()
     async with CACHE_LOCK:
         CACHE.update(data)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/auth/pubkey")
+async def api_auth_pubkey():
+    return JSONResponse({"public_key": RSA_PUBLIC_PEM})
+
+
+@app.post("/api/auth/register")
+async def api_auth_register(payload: Dict[str, Any]):
+    try:
+        username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
+        password = _decrypt_client_field(str(payload.get("password_enc") or ""))
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_encrypted_payload"}, status_code=400)
+
+    if len(username) < 3 or len(password) < 6:
+        return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=400)
+
+    async with USERS_LOCK:
+        if username in USERS:
+            return JSONResponse({"ok": False, "error": "user_exists"}, status_code=400)
+        salt, pwh = _make_password_record(password)
+        USERS[username] = {
+            "username": username,
+            "salt": salt,
+            "password_hash": pwh,
+            "is_admin": False,
+            "subscription_approved": False,
+            "created_at": int(time.time()),
+        }
+        _save_users(USERS)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(payload: Dict[str, Any]):
+    try:
+        username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
+        password = _decrypt_client_field(str(payload.get("password_enc") or ""))
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_encrypted_payload"}, status_code=400)
+
+    user = USERS.get(username)
+    if not user or not _verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
+        return JSONResponse({"ok": False, "error": "bad_login"}, status_code=401)
+
+    token = _make_session(username)
+    return JSONResponse(
+        {
+            "ok": True,
+            "token": token,
+            "user": {
+                "username": user["username"],
+                "is_admin": bool(user.get("is_admin")),
+                "subscription_approved": bool(user.get("subscription_approved")),
+            },
+        }
+    )
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request):
+    user = _session_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "user": None}, status_code=401)
+    return JSONResponse(
+        {
+            "ok": True,
+            "user": {
+                "username": user["username"],
+                "is_admin": bool(user.get("is_admin")),
+                "subscription_approved": bool(user.get("subscription_approved")),
+            },
+        }
+    )
+
+
+@app.post("/api/auth/logout")
+async def api_auth_logout(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        SESSIONS.pop(auth[7:], None)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/users")
+async def api_admin_users(request: Request):
+    user = _session_user(request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    items = []
+    for u in USERS.values():
+        items.append({
+            "username": u.get("username"),
+            "is_admin": bool(u.get("is_admin")),
+            "subscription_approved": bool(u.get("subscription_approved")),
+            "created_at": u.get("created_at"),
+        })
+    items.sort(key=lambda x: (not x["is_admin"], x["username"]))
+    return JSONResponse({"ok": True, "users": items})
+
+
+@app.post("/api/admin/subscription")
+async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
+    admin = _session_user(request)
+    if not admin or not admin.get("is_admin"):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    username = _normalize_username(str(payload.get("username") or ""))
+    approved = bool(payload.get("approved"))
+    if not username or username not in USERS:
+        return JSONResponse({"ok": False, "error": "user_not_found"}, status_code=404)
+    if USERS[username].get("is_admin"):
+        return JSONResponse({"ok": False, "error": "cant_change_admin"}, status_code=400)
+    async with USERS_LOCK:
+        USERS[username]["subscription_approved"] = approved
+        _save_users(USERS)
     return JSONResponse({"ok": True})
 
 
