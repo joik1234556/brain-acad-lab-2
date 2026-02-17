@@ -337,6 +337,7 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
 
 async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
+    dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
     contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
     contracts = _as_list(contracts_resp)
 
@@ -357,7 +358,7 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 norm_to_raw[upper_raw] = raw
 
     selected = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
-    if len(selected) < 150:
+    if len(selected) < 120:
         for s in norm_to_raw:
             if s not in selected:
                 selected.append(s)
@@ -365,6 +366,7 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 break
 
     sem = asyncio.Semaphore(BINGX_CONCURRENCY)
+    dbg["selected"] = len(selected)
     bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
         fetch_json(session, BINGX_BOOK_TICKER),
         fetch_json(session, BINGX_TICKER_24H),
@@ -409,7 +411,9 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
             tick = dict(bulk_tick.get(raw_key, {}))
             prem = dict(bulk_prem.get(raw_key, {}))
 
-            if not (book and tick and prem):
+            used_fallback = False
+            if not (book and tick):
+                used_fallback = True
                 async with sem:
                     fb, ft, fp = await asyncio.gather(
                         fetch_symbol(BINGX_BOOK_TICKER),
@@ -426,6 +430,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
 
             bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
             ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
+            if not is_pos(bid):
+                bid = _pick_float(tick, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
+            if not is_pos(ask):
+                ask = _pick_float(tick, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
             last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
 
             vol_quote = _pick_float(tick, [
@@ -442,10 +450,20 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 vol = _pick_float(contract, ["quoteVolume", "quoteVolume24h", "turnover", "turnover24h", "amount24", "volumeQuote"])
 
             fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
+            if not math.isfinite(fund):
+                fund = _pick_float(tick, ["fundingRate", "lastFundingRate", "funding"])
             next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
+            if not math.isfinite(next_ts):
+                next_ts = _pick_ts(contract, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
 
             if not (is_pos(bid) and is_pos(ask)):
+                dbg["rejected_no_quote"] += 1
                 return None
+
+            if used_fallback:
+                dbg["from_fallback"] += 1
+            else:
+                dbg["from_bulk"] += 1
 
             return norm_sym, MarketRow(
                 exchange="BingX",
@@ -470,6 +488,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
     for item in res:
         if isinstance(item, tuple):
             out[item[0]] = item[1]
+    print(
+        f"[BingX] selected={dbg['selected']} ok={len(out)} "
+        f"bulk={dbg['from_bulk']} fallback={dbg['from_fallback']} rejected={dbg['rejected_no_quote']}"
+    )
     return out
 
 
