@@ -135,6 +135,10 @@ def normalize_usdt(base: str) -> str:
     return f"{b}USDT"
 
 
+def normalize_symbol_key(symbol: str) -> str:
+    return (symbol or "").upper().replace("-", "").replace("_", "").replace("/", "")
+
+
 def _as_list(resp: Any) -> List[dict]:
     if isinstance(resp, dict):
         d = resp.get("data")
@@ -258,12 +262,22 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
     contracts = _as_list(contracts_resp)
 
     norm_to_raw: Dict[str, str] = {}
+    contract_by_raw: Dict[str, dict] = {}
     for c in contracts:
         raw = str(c.get("symbol") or "")
-        if "-" not in raw:
+        if not raw:
             continue
-        base, quote = raw.split("-", 1)
-        if quote.upper() == "USDT":
+        contract_by_raw[raw] = c
+
+        if "-" in raw:
+            base, quote = raw.split("-", 1)
+            if quote.upper() == "USDT":
+                norm_to_raw[normalize_usdt(base)] = raw
+            continue
+
+        upper_raw = raw.upper()
+        if upper_raw.endswith("USDT"):
+            base = upper_raw[:-4]
             norm_to_raw[normalize_usdt(base)] = raw
 
     selected = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
@@ -282,15 +296,15 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         fetch_json(session, BINGX_PREMIUM_INDEX),
         return_exceptions=True,
     )
-    b_map = {str(x.get("symbol")): x for x in _as_list(book_bulk) if isinstance(book_bulk, (dict, list)) for x in []}
+    b_map: Dict[str, dict] = {}
     if not isinstance(book_bulk, Exception):
-        b_map = {str(x.get("symbol")): x for x in _as_list(book_bulk) if x.get("symbol")}
-    t_map = {}
+        b_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(book_bulk) if x.get("symbol")}
+    t_map: Dict[str, dict] = {}
     if not isinstance(tick_bulk, Exception):
-        t_map = {str(x.get("symbol")): x for x in _as_list(tick_bulk) if x.get("symbol")}
-    p_map = {}
+        t_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(tick_bulk) if x.get("symbol")}
+    p_map: Dict[str, dict] = {}
     if not isinstance(prem_bulk, Exception):
-        p_map = {str(x.get("symbol")): x for x in _as_list(prem_bulk) if x.get("symbol")}
+        p_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(prem_bulk) if x.get("symbol")}
 
     sem = asyncio.Semaphore(BINGX_CONCURRENCY)
 
@@ -298,10 +312,11 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         raw = norm_to_raw.get(norm_sym)
         if not raw:
             return None
+        raw_key = normalize_symbol_key(raw)
         try:
-            book = b_map.get(raw)
-            tick = t_map.get(raw)
-            prem = p_map.get(raw)
+            book = b_map.get(raw_key)
+            tick = t_map.get(raw_key)
+            prem = p_map.get(raw_key)
             if not (book and tick and prem):
                 async with sem:
                     fb, ft, fp = await asyncio.gather(
@@ -336,11 +351,21 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 "quoteVolume24h", "quoteVolume24H", "amountQuote", "volumeQuote"
             ])
             vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "amount", "vol", "volume24h"])
+            contract = contract_by_raw.get(raw, {})
             vol = vol_quote
             if not is_pos(vol):
                 price = last if is_pos(last) else (bid + ask) / 2 if is_pos(bid) and is_pos(ask) else math.nan
                 if is_pos(vol_base) and is_pos(price):
                     vol = vol_base * price
+            if not is_pos(vol):
+                vol = _pick_float(contract, [
+                    "quoteVolume",
+                    "quoteVolume24h",
+                    "turnover",
+                    "turnover24h",
+                    "amount24",
+                    "volumeQuote",
+                ])
 
             fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
             next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
@@ -373,7 +398,12 @@ def exec_spread(buy: MarketRow, sell: MarketRow) -> float:
 
 
 def best_pair(rows: List[MarketRow], min_vol: float) -> Optional[Dict[str, Any]]:
-    valid = [r for r in rows if is_pos(r.ask) and is_pos(r.bid) and math.isfinite(r.vol24_usd) and r.vol24_usd >= min_vol]
+    def _vol_ok(row: MarketRow) -> bool:
+        if math.isfinite(row.vol24_usd):
+            return row.vol24_usd >= min_vol
+        return row.exchange == "BingX"
+
+    valid = [r for r in rows if is_pos(r.ask) and is_pos(r.bid) and _vol_ok(r)]
     if len(valid) < 2:
         return None
 
@@ -478,6 +508,7 @@ th.sortable{cursor:pointer;user-select:none} th.sortable .arr{opacity:.7;margin-
 tr:hover{background:rgba(120,130,150,.1)} .pinned{background:rgba(239,208,70,.16)!important}.fav{font-size:18px;cursor:pointer}
 .token{font-size:28px;font-weight:800;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;padding:2px 0}.pair-line + .pair-line{border-top:1px solid var(--line);margin-top:3px;padding-top:5px}
 .long{color:var(--good);font-weight:700}.short{color:var(--bad);font-weight:700}.xlogo{width:20px;height:20px;object-fit:contain;border-radius:99px}
+.split-cell{padding:0!important}.split-cell .line{padding:8px 10px;line-height:1.25}.split-cell .line + .line{border-top:1px solid var(--line)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .spread-pill{display:inline-block;background:var(--good);padding:3px 8px;border-radius:8px;font-weight:800;color:#0f2817}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
 @media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
@@ -486,7 +517,7 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 <div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск по началу токена</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="number" min="0" step="0.01"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="clearExBtn">Очистить</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
-<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Buy Ask<span class="arr"></span></th><th class="sortable" data-sort="sell_bid">Sell Bid<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Fund Buy<span class="arr"></span></th><th class="sortable" data-sort="sell_funding">Fund Sell<span class="arr"></span></th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Buy Vol<span class="arr"></span></th><th class="sortable" data-sort="sell_vol">Sell Vol<span class="arr"></span></th></tr></thead><tbody id="tbody"><tr><td colspan="12">Загрузка...</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th></tr></thead><tbody id="tbody"><tr><td colspan="9">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
@@ -522,8 +553,45 @@ function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'f
 
 async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){const a=new Audio(`/assets/sounds/${encodeURIComponent(STATE.soundFile)}`); a.volume=0.8; await a.play(); return;} }catch(_e){} try{const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='triangle'; o.frequency.value=920; g.gain.setValueAtTime(0.0001,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14); o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(_e2){} }
 
-function render(){if(!STATE.data)return; document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`; document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`; let rows=applyFilters([...(STATE.data.rows||[])]); sortRows(rows); refreshSortIndicators(); const tb=document.getElementById('tbody'); tb.innerHTML=''; if(!rows.length){tb.innerHTML='<tr><td colspan="12">Ничего не найдено.</td></tr>'; return;} const top=rows[0]; const key=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`; if(key!==LAST_ALERT){LAST_ALERT=key; playAlert();}
-rows.forEach(r=>{const pin=isPinned(r.symbol); const tr=document.createElement('tr'); if(pin)tr.classList.add('pinned'); const lbuy=logoFor(r.buy_ex); const lsell=logoFor(r.sell_ex); tr.innerHTML=`<td><span class='fav'>${pin?'★':'☆'}</span></td><td class='token'>${r.symbol.replace('USDT','')}</td><td><div class='pair-line long'>⬆ LONG ${lbuy?`<img class='xlogo' src='${lbuy}'/>`:''} <a href='${r.buy_url}' target='_blank'>${r.buy_ex}</a></div><div class='pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div></td><td class='mono'>${fmtPrice(r.buy_ask)}</td><td class='mono'>${fmtPrice(r.sell_bid)}</td><td class='mono'>${fmtPct(r.buy_funding,3)}</td><td class='mono'>${fmtPct(r.sell_funding,3)}</td><td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td><td class='mono'><div>${r.funding_eta_buy||'--:--:--'}</div><div>${r.funding_eta_sell||'--:--:--'}</div></td><td><span class='spread-pill'>${fmtPct(r.spread,2)}</span></td><td class='mono'>${fmtUsd(r.buy_vol)}</td><td class='mono'>${fmtUsd(r.sell_vol)}</td>`; tr.querySelector('.fav').onclick=()=>togglePinned(r.symbol); tb.appendChild(tr);});}
+function render(){
+if(!STATE.data)return;
+document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
+document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`;
+let rows=applyFilters([...(STATE.data.rows||[])]);
+sortRows(rows);
+refreshSortIndicators();
+const tb=document.getElementById('tbody');
+tb.innerHTML='';
+if(!rows.length){tb.innerHTML='<tr><td colspan="9">Ничего не найдено.</td></tr>'; return;}
+const top=rows[0];
+const key=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
+if(key!==LAST_ALERT){LAST_ALERT=key; playAlert();}
+
+const split=(a,b,extra='')=>`<td class='split-cell mono ${extra}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
+rows.forEach(r=>{
+  const pin=isPinned(r.symbol);
+  const tr=document.createElement('tr');
+  if(pin)tr.classList.add('pinned');
+  const lbuy=logoFor(r.buy_ex);
+  const lsell=logoFor(r.sell_ex);
+  tr.innerHTML=`
+    <td><span class='fav'>${pin?'★':'☆'}</span></td>
+    <td class='token'>${r.symbol.replace('USDT','')}</td>
+    <td class='split-cell'>
+      <div class='line pair-line long'>⬆ LONG ${lbuy?`<img class='xlogo' src='${lbuy}'/>`:''} <a href='${r.buy_url}' target='_blank'>${r.buy_ex}</a></div>
+      <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
+    </td>
+    ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid))}
+    ${split(fmtPct(r.buy_funding,3),fmtPct(r.sell_funding,3))}
+    ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--')}
+    <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
+    <td><span class='spread-pill'>${fmtPct(r.spread,2)}</span></td>
+    ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol))}
+  `;
+  tr.querySelector('.fav').onclick=()=>togglePinned(r.symbol);
+  tb.appendChild(tr);
+});
+}
 
 async function refreshData(){STATE.data=await apiGet('/api/data'); render();}
 
