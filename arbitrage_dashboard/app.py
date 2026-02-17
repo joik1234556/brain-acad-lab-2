@@ -310,43 +310,22 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         if not raw:
             continue
         contract_by_raw[raw] = c
-
         if "-" in raw:
             base, quote = raw.split("-", 1)
             if quote.upper() == "USDT":
                 norm_to_raw[normalize_usdt(base)] = raw
-            continue
-
-        upper_raw = raw.upper()
-        if upper_raw.endswith("USDT"):
-            base = upper_raw[:-4]
-            norm_to_raw[normalize_usdt(base)] = raw
+        else:
+            upper_raw = raw.upper()
+            if upper_raw.endswith("USDT"):
+                norm_to_raw[upper_raw] = raw
 
     selected = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
-    if len(selected) < 120:
-        seen = set(selected)
+    if len(selected) < 150:
         for s in norm_to_raw:
-            if s in seen:
-                continue
-            selected.append(s)
+            if s not in selected:
+                selected.append(s)
             if len(selected) >= MAX_BINGX_SYMBOLS:
                 break
-
-    book_bulk, tick_bulk, prem_bulk = await asyncio.gather(
-        fetch_json(session, BINGX_BOOK_TICKER),
-        fetch_json(session, BINGX_TICKER_24H),
-        fetch_json(session, BINGX_PREMIUM_INDEX),
-        return_exceptions=True,
-    )
-    b_map: Dict[str, dict] = {}
-    if not isinstance(book_bulk, Exception):
-        b_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(book_bulk) if x.get("symbol")}
-    t_map: Dict[str, dict] = {}
-    if not isinstance(tick_bulk, Exception):
-        t_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(tick_bulk) if x.get("symbol")}
-    p_map: Dict[str, dict] = {}
-    if not isinstance(prem_bulk, Exception):
-        p_map = {normalize_symbol_key(str(x.get("symbol"))): x for x in _as_list(prem_bulk) if x.get("symbol")}
 
     sem = asyncio.Semaphore(BINGX_CONCURRENCY)
 
@@ -354,63 +333,42 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         raw = norm_to_raw.get(norm_sym)
         if not raw:
             return None
-        raw_key = normalize_symbol_key(raw)
+        contract = contract_by_raw.get(raw, {})
         try:
-            book = b_map.get(raw_key)
-            tick = t_map.get(raw_key)
-            prem = p_map.get(raw_key)
-            if not (book and tick and prem):
-                async with sem:
-                    fb, ft, fp = await asyncio.gather(
-                        fetch_json(session, BINGX_BOOK_TICKER, params={"symbol": raw}),
-                        fetch_json(session, BINGX_TICKER_24H, params={"symbol": raw}),
-                        fetch_json(session, BINGX_PREMIUM_INDEX, params={"symbol": raw}),
-                        return_exceptions=True,
-                    )
-                if not isinstance(fb, Exception):
-                    lst = _as_list(fb)
-                    if lst:
-                        book = lst[0]
-                if not isinstance(ft, Exception):
-                    lst = _as_list(ft)
-                    if lst:
-                        tick = lst[0]
-                if not isinstance(fp, Exception):
-                    lst = _as_list(fp)
-                    if lst:
-                        prem = lst[0]
+            async with sem:
+                fb, ft, fp = await asyncio.gather(
+                    fetch_json(session, BINGX_BOOK_TICKER, params={"symbol": raw}),
+                    fetch_json(session, BINGX_TICKER_24H, params={"symbol": raw}),
+                    fetch_json(session, BINGX_PREMIUM_INDEX, params={"symbol": raw}),
+                    return_exceptions=True,
+                )
 
-            book = book or {}
-            tick = tick or {}
-            prem = prem or {}
+            book = _as_list(fb)[0] if not isinstance(fb, Exception) and _as_list(fb) else {}
+            tick = _as_list(ft)[0] if not isinstance(ft, Exception) and _as_list(ft) else {}
+            prem = _as_list(fp)[0] if not isinstance(fp, Exception) and _as_list(fp) else {}
 
             bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
             ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
             last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
 
             vol_quote = _pick_float(tick, [
-                "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H",
-                "quoteVolume24h", "quoteVolume24H", "amountQuote", "volumeQuote"
+                "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H",
+                "amountQuote", "volumeQuote",
             ])
             vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "amount", "vol", "volume24h"])
-            contract = contract_by_raw.get(raw, {})
             vol = vol_quote
             if not is_pos(vol):
                 price = last if is_pos(last) else (bid + ask) / 2 if is_pos(bid) and is_pos(ask) else math.nan
                 if is_pos(vol_base) and is_pos(price):
                     vol = vol_base * price
             if not is_pos(vol):
-                vol = _pick_float(contract, [
-                    "quoteVolume",
-                    "quoteVolume24h",
-                    "turnover",
-                    "turnover24h",
-                    "amount24",
-                    "volumeQuote",
-                ])
+                vol = _pick_float(contract, ["quoteVolume", "quoteVolume24h", "turnover", "turnover24h", "amount24", "volumeQuote"])
 
             fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
             next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
+
+            if not (is_pos(bid) and is_pos(ask)):
+                return None
 
             return norm_sym, MarketRow(
                 exchange="BingX",
@@ -439,7 +397,7 @@ def exec_spread(buy: MarketRow, sell: MarketRow) -> float:
     return (sell.bid - buy.ask) / buy.ask
 
 
-def best_pair(rows: List[MarketRow], min_vol: float) -> Optional[Dict[str, Any]]:
+def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
     def _vol_ok(row: MarketRow) -> bool:
         if math.isfinite(row.vol24_usd):
             return row.vol24_usd >= min_vol
@@ -447,38 +405,34 @@ def best_pair(rows: List[MarketRow], min_vol: float) -> Optional[Dict[str, Any]]
 
     valid = [r for r in rows if is_pos(r.ask) and is_pos(r.bid) and _vol_ok(r)]
     if len(valid) < 2:
-        return None
+        return []
 
-    best: Optional[Tuple[MarketRow, MarketRow, float]] = None
+    out: List[Dict[str, Any]] = []
     for buy in valid:
         for sell in valid:
             if buy.exchange == sell.exchange:
                 continue
             spread = exec_spread(buy, sell)
-            if math.isfinite(spread) and (best is None or spread > best[2]):
-                best = (buy, sell, spread)
-
-    if not best:
-        return None
-
-    buy, sell, spread = best
-    fund_spread = sell.fund_rate - buy.fund_rate if math.isfinite(sell.fund_rate) and math.isfinite(buy.fund_rate) else math.nan
-    return {
-        "spread": spread,
-        "buy_ex": buy.exchange,
-        "sell_ex": sell.exchange,
-        "buy_ask": buy.ask,
-        "sell_bid": sell.bid,
-        "buy_funding": buy.fund_rate,
-        "sell_funding": sell.fund_rate,
-        "funding_spread": fund_spread,
-        "funding_eta_buy": funding_eta_str(buy.next_funding_ts),
-        "funding_eta_sell": funding_eta_str(sell.next_funding_ts),
-        "buy_vol": buy.vol24_usd,
-        "sell_vol": sell.vol24_usd,
-        "buy_url": buy.url,
-        "sell_url": sell.url,
-    }
+            if not math.isfinite(spread):
+                continue
+            fund_spread = sell.fund_rate - buy.fund_rate if math.isfinite(sell.fund_rate) and math.isfinite(buy.fund_rate) else math.nan
+            out.append({
+                "spread": spread,
+                "buy_ex": buy.exchange,
+                "sell_ex": sell.exchange,
+                "buy_ask": buy.ask,
+                "sell_bid": sell.bid,
+                "buy_funding": buy.fund_rate,
+                "sell_funding": sell.fund_rate,
+                "funding_spread": fund_spread,
+                "funding_eta_buy": funding_eta_str(buy.next_funding_ts),
+                "funding_eta_sell": funding_eta_str(sell.next_funding_ts),
+                "buy_vol": buy.vol24_usd,
+                "sell_vol": sell.vol24_usd,
+                "buy_url": buy.url,
+                "sell_url": sell.url,
+            })
+    return out
 
 
 def load_config() -> Dict[str, Any]:
@@ -639,12 +593,13 @@ body.theme-dark-blue select option, body.theme-binance select option, body.theme
 th,td{padding:10px;border-bottom:1px solid var(--line);font-size:14px} th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:13px;font-weight:700}
 th.sortable{cursor:pointer;user-select:none} th.sortable .arr{opacity:.7;margin-left:5px;font-size:11px}
 tr:hover{background:rgba(120,130,150,.1)} .pinned{background:rgba(239,208,70,.16)!important}.fav{font-size:18px;cursor:pointer}
-.token{font-size:28px;font-weight:800;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;padding:2px 0}.pair-line + .pair-line{border-top:1px solid var(--line);margin-top:3px;padding-top:5px}
+.token{font-size:28px;font-weight:800;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;min-height:36px}
 .long{color:var(--good);font-weight:700}.short{color:var(--bad);font-weight:700}.xlogo{width:20px;height:20px;object-fit:contain;border-radius:99px}
-.split-cell{padding:0!important}.split-cell .line{padding:8px 10px;line-height:1.25}.split-cell .line + .line{border-top:1px solid var(--line)}
+.split-cell{padding:0!important}.split-cell .line{display:flex;align-items:center;min-height:36px;padding:0 10px}.split-cell .line + .line{border-top:1px solid var(--line)}
 .auth-wrap{margin:8px 0 10px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
 .auth-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .auth-row input{max-width:220px}
+#authForm{display:none}
 .small{font-size:12px;color:var(--muted)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .spread-pill{display:inline-block;background:var(--good);padding:3px 8px;border-radius:8px;font-weight:800;color:#0f2817}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
@@ -654,14 +609,14 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 <div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск по началу токена</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="number" min="0" step="0.01"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="clearExBtn">Очистить</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
-<div class="auth-wrap"><div class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: доступ до 2% спреда</span></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
+<div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: доступ до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th></tr></thead><tbody id="tbody"><tr><td colspan="9">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
-let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:''};
+let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
 const I18N={ru:{filterTitle:'Фильтр',search:'Поиск по началу токена',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
@@ -683,9 +638,11 @@ async function encryptWithPub(plain){
   return b64(enc);
 }
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/register',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown'));}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/login',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); if(!r.ok){setAuthStateText('Ошибка входа'); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; await refreshData(); renderAuth();}
-async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); await refreshData(); renderAuth();}
+function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('btnAuthSubmit').textContent=mode==='register'?'Зарегистрироваться':'Войти';}
+function closeAuthForm(){document.getElementById('authForm').style.display='none';}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/register',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/login',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); if(!r.ok){setAuthStateText('Ошибка входа'); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
   const u=STATE.user;
@@ -716,9 +673,9 @@ function refreshSortIndicators(){document.querySelectorAll('th.sortable').forEac
 
 function renderExchangeFilters(){const box=document.getElementById('exchangeBox'); box.innerHTML=''; ['MEXC','Bybit','BingX'].forEach(ex=>{const chip=document.createElement('label'); const on=!!STATE.config.enabled?.[ex]; chip.className='chip'+(on?'':' off'); const logo=logoFor(ex); chip.innerHTML=`<input type="checkbox" ${on?'checked':''}/> ${logo?`<img src="${logo}" alt="${ex}"/>`:''} ${ex}`; chip.onclick=async (e)=>{e.preventDefault(); const en={...(STATE.config.enabled||{})}; en[ex]=!en[ex]; STATE.config=await apiPost('/api/config',{enabled:en}); renderExchangeFilters(); await refreshData();}; box.appendChild(chip);});}
 function clearExchangeFilters(){STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
-function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; document.getElementById('minSpread').value='0'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
+function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; localStorage.setItem('minVolInput','0'); document.getElementById('minSpread').value='0'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
 
-function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parseFloat(document.getElementById('minSpread').value||'0')/100; return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0 && !(r.buy_vol>=minVol && r.sell_vol>=minVol)) return false; if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
+function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parseFloat(document.getElementById('minSpread').value||'0')/100; return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
 function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinned(a.symbol)?1:0; const pb=isPinned(b.symbol)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
 function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'fpos';}
 
@@ -768,11 +725,11 @@ rows.forEach(r=>{
 
 async function refreshData(){STATE.data=await apiGet('/api/data'); render();}
 
-async function boot(){STATE.config=await apiGet('/api/config'); await loadMe(); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100); document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang(); renderAuth();
+async function boot(){STATE.config=await apiGet('/api/config'); await loadMe(); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=localStorage.getItem('minVolInput')||String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100); document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang(); renderAuth();
 const ss=document.getElementById('soundSel'); ss.innerHTML=''; (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);}); if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} renderExchangeFilters(); render();
 
 document.getElementById('q').addEventListener('input',render);
-document.getElementById('minVol').addEventListener('change',async e=>{const v=Math.max(0,parseVolumeInput(e.target.value||'0')); STATE.config=await apiPost('/api/config',{min_vol:v}); e.target.value=String(v); await refreshData();});
+document.getElementById('minVol').addEventListener('change',async e=>{const raw=(e.target.value||'0').trim(); const v=Math.max(0,parseVolumeInput(raw)); localStorage.setItem('minVolInput',raw||'0'); STATE.config=await apiPost('/api/config',{min_vol:v}); await refreshData();});
 document.getElementById('minSpread').addEventListener('change',async e=>{const v=Math.max(0,parseFloat(e.target.value||'0'))/100; STATE.config=await apiPost('/api/config',{min_spread:v}); await refreshData();});
 document.getElementById('themeSel').addEventListener('change',e=>{STATE.theme=e.target.value; applyTheme();});
 document.getElementById('langSel').addEventListener('change',e=>{STATE.lang=e.target.value; applyLang(); render();});
@@ -780,7 +737,7 @@ document.getElementById('soundToggle').addEventListener('change',e=>{STATE.sound
 document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
 document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); await apiPost('/api/refresh',{}); await refreshData();});
 document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters); document.getElementById('clearExBtn').addEventListener('click',clearExchangeFilters);
-document.getElementById('btnRegister').addEventListener('click',registerUser); document.getElementById('btnLogin').addEventListener('click',loginUser); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
+document.getElementById('btnRegister').addEventListener('click',()=>openAuthForm('register')); document.getElementById('btnLogin').addEventListener('click',()=>openAuthForm('login')); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnAuthCancel').addEventListener('click',closeAuthForm); document.getElementById('btnAuthSubmit').addEventListener('click',async()=>{if(STATE.authMode==='register') await registerUser(); else await loginUser();}); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
 document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
 setInterval(refreshData,Math.max(1000,(STATE.config.refresh_sec||5)*1000)); }
 boot();
@@ -815,13 +772,14 @@ async def compute_once() -> Dict[str, Any]:
         rows = [r for r in (mexc.get(symbol), bybit.get(symbol), bingx.get(symbol)) if r]
         if len(rows) < 2:
             continue
-        best = best_pair(rows, min_vol=min_vol)
-        if not best:
+        pairs = best_pairs(rows, min_vol=min_vol)
+        if not pairs:
             continue
-        if best["spread"] < min_spread:
-            continue
-        best["symbol"] = symbol
-        rows_out.append(best)
+        for best in pairs:
+            if best["spread"] < min_spread:
+                continue
+            best["symbol"] = symbol
+            rows_out.append(best)
 
     rows_out.sort(key=lambda row: row["spread"], reverse=True)
     return {
