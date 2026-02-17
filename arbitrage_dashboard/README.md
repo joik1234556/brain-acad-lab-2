@@ -10,6 +10,14 @@
 - Настройки (`min_vol`, `min_spread`, `enabled`, `refresh_sec`) сохраняются в `arb_dashboard_config.json`.
 
 ## Запуск
+
+### Быстрый запуск в Windows (без консоли)
+- Просто дважды кликните `run_dashboard.bat` в папке проекта.
+- Батник сам:
+  - создаст `.venv` (если его нет),
+  - установит зависимости (если не установлены),
+  - запустит дашборд на `http://127.0.0.1:8000`.
+
 ### Linux / macOS
 ```bash
 cd arbitrage_dashboard
