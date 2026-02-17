@@ -445,7 +445,7 @@ HTML_PAGE = r"""
     .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:8px 12px;border-radius:10px;font-size:15px;cursor:pointer}
     .btn[disabled]{opacity:.45;cursor:not-allowed}
 
-    .filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
+    .filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
     .lbl{font-size:14px;color:var(--muted);margin-bottom:6px;font-weight:600}
     input,select{width:100%;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 10px;font-size:15px}
 
@@ -486,7 +486,7 @@ HTML_PAGE = r"""
 <div class="wrap">
   <div class="filter-card">
     <div class="filter-head">
-      <div class="filter-title">Фильтр</div>
+      <div class="filter-title" id="filterTitle">Фильтр</div>
       <button class="btn" id="clearFiltersBtn">Очистить фильтр</button>
     </div>
     <div class="filter-grid">
@@ -495,15 +495,23 @@ HTML_PAGE = r"""
         <input id="q" placeholder="BTC" />
       </div>
       <div>
-        <div class="lbl">Оборот 24h (USD)</div>
-        <input id="minVol" type="number" min="0" step="100000" />
+        <div class="lbl" id="lblMinVol">Оборот 24h (USD)</div>
+        <input id="minVol" type="text" placeholder="1m / 0.5m / 250k" />
       </div>
       <div>
-        <div class="lbl">OpenSpread, %</div>
+        <div class="lbl" id="lblMinSpread">OpenSpread, %</div>
         <input id="minSpread" type="number" min="0" step="0.01" />
       </div>
       <div>
-        <div class="lbl">Тема</div>
+        <div class="lbl" id="lblLang">Язык</div>
+        <select id="langSel">
+          <option value="ru">🇷🇺 Русский</option>
+          <option value="uk">🇺🇦 Українська</option>
+          <option value="en">🇬🇧 English</option>
+        </select>
+      </div>
+      <div>
+        <div class="lbl" id="lblTheme">Тема</div>
         <select id="themeSel">
           <option value="theme-dark">Dark Blue</option>
           <option value="theme-light">Light</option>
@@ -511,7 +519,7 @@ HTML_PAGE = r"""
         </select>
       </div>
       <div>
-        <div class="lbl">Оповещение</div>
+        <div class="lbl" id="lblSound">Оповещение</div>
         <label class="chip"><input type="checkbox" id="soundToggle" /> звук</label>
       </div>
       <div>
@@ -521,7 +529,7 @@ HTML_PAGE = r"""
 
     <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-      <div class="lbl" style="margin:0">Биржи</div>
+      <div class="lbl" style="margin:0" id="lblExchanges">Биржи</div>
       <button class="btn" id="clearExBtn">Очистить</button>
     </div>
     <div class="chips" id="exchangeBox"></div>
@@ -538,8 +546,8 @@ HTML_PAGE = r"""
       <thead>
         <tr>
           <th>Fav</th>
-          <th>Токен</th>
-          <th>Покупка / Продажа</th>
+          <th id="thToken">Токен</th>
+          <th id="thPair">Покупка / Продажа</th>
           <th class="sortable" data-sort="buy_ask">Buy Ask<span class="arr"></span></th>
           <th class="sortable" data-sort="sell_bid">Sell Bid<span class="arr"></span></th>
           <th class="sortable" data-sort="buy_funding">Fund Buy<span class="arr"></span></th>
@@ -572,8 +580,24 @@ let STATE={
   pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),
   theme:localStorage.getItem('theme')||'theme-classic',
   sound:(localStorage.getItem('soundOn')||'0')==='1',
+  lang:localStorage.getItem('lang')||'ru',
   sortKey:'spread',
   sortDir:'desc'
+};
+
+const I18N={
+  ru:{
+    filterTitle:'Фильтр', lblMinVol:'Оборот 24h (USD)', lblMinSpread:'OpenSpread, %', lblLang:'Язык', lblTheme:'Тема', lblSound:'Оповещение', lblExchanges:'Биржи',
+    clearFilters:'Очистить фильтр', clear:'Очистить', token:'Токен', pair:'Покупка / Продажа',
+  },
+  uk:{
+    filterTitle:'Фільтр', lblMinVol:'Обсяг 24h (USD)', lblMinSpread:'OpenSpread, %', lblLang:'Мова', lblTheme:'Тема', lblSound:'Сповіщення', lblExchanges:'Біржі',
+    clearFilters:'Очистити фільтр', clear:'Очистити', token:'Токен', pair:'Купівля / Продаж',
+  },
+  en:{
+    filterTitle:'Filter', lblMinVol:'Volume 24h (USD)', lblMinSpread:'OpenSpread, %', lblLang:'Language', lblTheme:'Theme', lblSound:'Alert', lblExchanges:'Exchanges',
+    clearFilters:'Clear filter', clear:'Clear', token:'Token', pair:'Buy / Sell',
+  }
 };
 
 const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
@@ -601,6 +625,36 @@ function applyTheme(){
   document.body.className=STATE.theme;
   document.getElementById('themeSel').value=STATE.theme;
   localStorage.setItem('theme',STATE.theme);
+}
+
+function applyLang(){
+  const t=I18N[STATE.lang]||I18N.ru;
+  document.getElementById('filterTitle').textContent=t.filterTitle;
+  document.getElementById('lblMinVol').textContent=t.lblMinVol;
+  document.getElementById('lblMinSpread').textContent=t.lblMinSpread;
+  document.getElementById('lblLang').textContent=t.lblLang;
+  document.getElementById('lblTheme').textContent=t.lblTheme;
+  document.getElementById('lblSound').textContent=t.lblSound;
+  document.getElementById('lblExchanges').textContent=t.lblExchanges;
+  document.getElementById('clearFiltersBtn').textContent=t.clearFilters;
+  document.getElementById('clearExBtn').textContent=t.clear;
+  document.getElementById('thToken').textContent=t.token;
+  document.getElementById('thPair').textContent=t.pair;
+  document.getElementById('langSel').value=STATE.lang;
+  localStorage.setItem('lang',STATE.lang);
+}
+
+function parseVolumeInput(raw){
+  const s=(raw||'').toString().trim().toLowerCase().replace(',', '.').replace('м','m');
+  if(!s) return 0;
+  const m=s.match(/^([0-9]+(?:\.[0-9]+)?)([kmb])?$/i);
+  if(!m) return parseFloat(s)||0;
+  const val=parseFloat(m[1]);
+  const suf=(m[2]||'').toLowerCase();
+  if(suf==='k') return val*1e3;
+  if(suf==='m') return val*1e6;
+  if(suf==='b') return val*1e9;
+  return val;
 }
 
 function setCooldown(sec){
@@ -661,7 +715,7 @@ function togglePinned(symbol){
 
 function applyFilters(rows){
   const q=(document.getElementById('q').value||'').trim().toUpperCase();
-  const minVol=parseFloat(document.getElementById('minVol').value||'0');
+  const minVol=parseVolumeInput(document.getElementById('minVol').value||'0');
   const minSpreadPct=parseFloat(document.getElementById('minSpread').value||'0');
   const minSpread=Number.isFinite(minSpreadPct)?minSpreadPct/100:0;
 
@@ -764,13 +818,15 @@ async function boot(){
   document.getElementById('soundToggle').checked=STATE.sound;
 
   applyTheme();
+  applyLang();
   renderExchangeFilters();
   render();
 
   document.getElementById('q').addEventListener('input', render);
   document.getElementById('minVol').addEventListener('change', async e=>{
-    const min_vol=Math.max(0,parseFloat(e.target.value||'0'));
+    const min_vol=Math.max(0,parseVolumeInput(e.target.value||'0'));
     STATE.config=await apiPost('/api/config',{min_vol});
+    e.target.value=String(min_vol);
     await refreshData();
   });
   document.getElementById('minSpread').addEventListener('change', async e=>{
@@ -782,6 +838,12 @@ async function boot(){
   document.getElementById('themeSel').addEventListener('change', e=>{
     STATE.theme=e.target.value;
     applyTheme();
+  });
+
+  document.getElementById('langSel').addEventListener('change', e=>{
+    STATE.lang=e.target.value;
+    applyLang();
+    render();
   });
 
   document.getElementById('soundToggle').addEventListener('change', e=>{
