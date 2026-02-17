@@ -204,6 +204,21 @@ def _pick_float(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
+def _match_symbol_entry(items: List[dict], variants: List[str]) -> Optional[dict]:
+    if not items:
+        return None
+    wanted = {normalize_symbol_key(v) for v in variants if v}
+    if not wanted:
+        return items[0]
+    for it in items:
+        s = str(it.get("symbol") or it.get("s") or "")
+        if normalize_symbol_key(s) in wanted:
+            return it
+    if len(items) == 1:
+        return items[0]
+    return None
+
+
 def _pick_ts(d: dict, keys: List[str]) -> float:
     for key in keys:
         raw = d.get(key)
@@ -350,6 +365,21 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 break
 
     sem = asyncio.Semaphore(BINGX_CONCURRENCY)
+    bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
+        fetch_json(session, BINGX_BOOK_TICKER),
+        fetch_json(session, BINGX_TICKER_24H),
+        fetch_json(session, BINGX_PREMIUM_INDEX),
+        return_exceptions=True,
+    )
+    bulk_book: Dict[str, dict] = {}
+    bulk_tick: Dict[str, dict] = {}
+    bulk_prem: Dict[str, dict] = {}
+    if not isinstance(bulk_book_resp, Exception):
+        bulk_book = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_book_resp)}
+    if not isinstance(bulk_tick_resp, Exception):
+        bulk_tick = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_tick_resp)}
+    if not isinstance(bulk_prem_resp, Exception):
+        bulk_prem = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_prem_resp)}
 
     async def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
         raw = norm_to_raw.get(norm_sym)
@@ -368,21 +398,31 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 resp = await fetch_json(session, url, params={"symbol": sym})
                 lst = _as_list(resp)
                 if lst:
-                    return lst[0]
+                    rec = _match_symbol_entry(lst, variants)
+                    if rec:
+                        return rec
             return {}
 
         try:
-            async with sem:
-                fb, ft, fp = await asyncio.gather(
-                    fetch_symbol(BINGX_BOOK_TICKER),
-                    fetch_symbol(BINGX_TICKER_24H),
-                    fetch_symbol(BINGX_PREMIUM_INDEX),
-                    return_exceptions=True,
-                )
+            raw_key = normalize_symbol_key(raw)
+            book = dict(bulk_book.get(raw_key, {}))
+            tick = dict(bulk_tick.get(raw_key, {}))
+            prem = dict(bulk_prem.get(raw_key, {}))
 
-            book = fb if isinstance(fb, dict) else {}
-            tick = ft if isinstance(ft, dict) else {}
-            prem = fp if isinstance(fp, dict) else {}
+            if not (book and tick and prem):
+                async with sem:
+                    fb, ft, fp = await asyncio.gather(
+                        fetch_symbol(BINGX_BOOK_TICKER),
+                        fetch_symbol(BINGX_TICKER_24H),
+                        fetch_symbol(BINGX_PREMIUM_INDEX),
+                        return_exceptions=True,
+                    )
+                if isinstance(fb, dict) and fb:
+                    book = fb
+                if isinstance(ft, dict) and ft:
+                    tick = ft
+                if isinstance(fp, dict) and fp:
+                    prem = fp
 
             bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
             ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
@@ -392,7 +432,7 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H",
                 "amountQuote", "volumeQuote",
             ])
-            vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "amount", "vol", "volume24h"])
+            vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "baseQty", "amount", "vol", "amountBase", "volumeBase", "volume24h"])
             vol = vol_quote
             if not is_pos(vol):
                 price = last if is_pos(last) else (bid + ask) / 2 if is_pos(bid) and is_pos(ask) else math.nan
@@ -441,9 +481,11 @@ def exec_spread(buy: MarketRow, sell: MarketRow) -> float:
 
 def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
     def _vol_ok(row: MarketRow) -> bool:
+        if row.exchange == "BingX":
+            return True
         if math.isfinite(row.vol24_usd):
             return row.vol24_usd >= min_vol
-        return row.exchange == "BingX"
+        return False
 
     valid = [r for r in rows if is_pos(r.ask) and is_pos(r.bid) and _vol_ok(r)]
     if len(valid) < 2:
