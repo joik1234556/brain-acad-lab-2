@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -313,7 +314,13 @@ def save_config(cfg: Dict[str, Any]) -> None:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    asyncio.create_task(updater_loop())
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 CFG = load_config()
 CACHE = {"updated_at": None, "rows": [], "dbg": {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}}
 CACHE_LOCK = asyncio.Lock()
@@ -325,7 +332,7 @@ HTML_PAGE = """<!doctype html><html lang='ru'><head><meta charset='utf-8'/><meta
 <div class='table'><table><thead><tr><th>Symbol</th><th>Spread</th><th>Buy</th><th>Sell</th><th>Prices</th><th>Funding</th><th>Funding24</th><th>Volume24h</th></tr></thead><tbody id='tbody'><tr><td colspan='8'>Загрузка...</td></tr></tbody></table></div></div>
 <script>
 let STATE={config:null,data:null};
-const fmt=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A'; const usd=x=>!Number.isFinite(x)?'N/A':x>1e6?(x/1e6).toFixed(1)+'m$':Math.round(x)+'$'; const px=x=>Number.isFinite(x)?x.toFixed(6).replace(/0+$/,'').replace(/\.$/,''):'N/A';
+const fmt=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A'; const usd=x=>!Number.isFinite(x)?'N/A':x>1e6?(x/1e6).toFixed(1)+'m$':Math.round(x)+'$'; const px=x=>Number.isFinite(x)?x.toFixed(6).replace(/0+$/,'').replace(/\\.$/,''):'N/A';
 async function jget(u){return (await fetch(u,{cache:'no-store'})).json()}; async function jpost(u,b){return (await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json()};
 function render(){ if(!STATE.data) return; let rows=STATE.data.rows||[]; const q=(document.getElementById('q').value||'').toUpperCase(); const minVol=parseFloat(document.getElementById('minVolSel').value||'0'); const minSpread=parseFloat(document.getElementById('minSpreadSel').value||'0'); rows=rows.filter(r=>(!q||r.symbol.includes(q))&&r.buy_vol>=minVol&&r.sell_vol>=minVol&&r.spread>=minSpread).sort((a,b)=>b.spread-a.spread); document.getElementById('updated').textContent='Updated: '+(STATE.data.updated_at||'—'); document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`; const tb=document.getElementById('tbody'); tb.innerHTML=''; if(!rows.length){tb.innerHTML="<tr><td colspan='8'>Ничего не найдено.</td></tr>"; return;} for(const r of rows){const cls=r.spread>=0.01?'good':(r.spread>=0.004?'mid':''); tb.insertAdjacentHTML('beforeend',`<tr><td class='mono'>${r.symbol}</td><td class='mono ${cls}'>${fmt(r.spread)}</td><td><a href='${r.buy_url}' target='_blank'>${r.buy_ex}</a></td><td><a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></td><td class='mono'>${px(r.buy_ask)} / ${px(r.sell_bid)}</td><td class='mono'>${fmt(r.buy_funding,3)} / ${fmt(r.sell_funding,3)}</td><td class='mono'>${fmt(r.buy_funding24,3)} / ${fmt(r.sell_funding24,3)}</td><td class='mono'>${usd(r.buy_vol)} / ${usd(r.sell_vol)}</td></tr>`)} }
 async function boot(){STATE.config=await jget('/api/config'); document.getElementById('minVolSel').value=String(STATE.config.min_vol); document.getElementById('minSpreadSel').value=String(STATE.config.min_spread); for(const id of ['q','minVolSel','minSpreadSel']) document.getElementById(id).addEventListener('input',render); document.getElementById('minVolSel').addEventListener('change',async e=>{await jpost('/api/config',{min_vol:parseFloat(e.target.value)}); STATE.config=await jget('/api/config'); STATE.data=await jget('/api/data'); render();}); document.getElementById('minSpreadSel').addEventListener('change',async e=>{await jpost('/api/config',{min_spread:parseFloat(e.target.value)}); STATE.config=await jget('/api/config'); STATE.data=await jget('/api/data'); render();}); document.getElementById('refreshBtn').addEventListener('click',async()=>{await jpost('/api/refresh',{}); STATE.data=await jget('/api/data'); render();}); STATE.data=await jget('/api/data'); render(); setInterval(async()=>{STATE.data=await jget('/api/data'); render();}, Math.max(1000,(STATE.config.refresh_sec||5)*1000)); }
@@ -387,12 +394,6 @@ async def updater_loop():
         except Exception:
             pass
         await asyncio.sleep(max(1, int(CFG.get("refresh_sec", DEFAULT_REFRESH_SEC))))
-
-
-@app.on_event("startup")
-async def on_start():
-    asyncio.create_task(updater_loop())
-
 
 @app.get("/", response_class=HTMLResponse)
 async def index():

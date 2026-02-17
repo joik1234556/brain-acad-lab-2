@@ -10,11 +10,30 @@
 - Настройки (`min_vol`, `min_spread`, `enabled`, `refresh_sec`) сохраняются в `arb_dashboard_config.json`.
 
 ## Запуск
+### Linux / macOS
 ```bash
 cd arbitrage_dashboard
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python app.py
+```
+
+### Windows (cmd)
+```bat
+cd arbitrage_dashboard
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+### Windows (PowerShell)
+```powershell
+cd arbitrage_dashboard
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python app.py
 ```
 
