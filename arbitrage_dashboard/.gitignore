@@ -1,0 +1,7 @@
+# Do not track user-provided binary assets
+assets/logos/*
+assets/sounds/*
+
+# Keep folder docs
+!assets/logos/README.txt
+!assets/sounds/README.txt

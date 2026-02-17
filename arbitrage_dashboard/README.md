@@ -1,0 +1,48 @@
+# Arbitrage Dashboard (FastAPI)
+
+Новый проект в отдельной папке для быстрого и красивого веб-дашборда арбитража.
+
+## Что уже оптимизировано
+- Асинхронная загрузка MEXC + Bybit параллельно.
+- Для BingX используется bulk-режим (1 запрос на endpoint без symbol), а затем fallback на точечные запросы только если нужно.
+- Кеш обновляется в фоне, UI читает только `/api/data`.
+- Клиентская фильтрация и сортировка выполняются мгновенно в браузере.
+- Настройки (`min_vol`, `min_spread`, `enabled`, `refresh_sec`) сохраняются в `arb_dashboard_config.json`.
+
+## Запуск
+
+### Быстрый запуск в Windows (без консоли)
+- Просто дважды кликните `run_dashboard.bat` в папке проекта.
+- Батник сам:
+  - создаст `.venv` (если его нет),
+  - установит зависимости (если не установлены),
+  - запустит дашборд на `http://127.0.0.1:8000`.
+
+### Linux / macOS
+```bash
+cd arbitrage_dashboard
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python app.py
+```
+
+### Windows (cmd)
+```bat
+cd arbitrage_dashboard
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+### Windows (PowerShell)
+```powershell
+cd arbitrage_dashboard
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Открыть: http://127.0.0.1:8000
