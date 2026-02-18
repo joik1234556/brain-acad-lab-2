@@ -277,225 +277,237 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
 
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
-    data = await fetch_json(session, MEXC_TICKERS)
-    items = data.get("data") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return out
+    try:
+        data = await fetch_json(session, MEXC_TICKERS)
+        items = data.get("data") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return out
 
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        symbol = str(it.get("symbol") or "")
-        if "_" not in symbol:
-            continue
-        base, quote = symbol.split("_", 1)
-        if quote.upper() != "USDT":
-            continue
-        fund = to_float(it.get("fundingRate"))
-        next_ts = _pick_ts(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
-        out[normalize_usdt(base)] = MarketRow(
-            exchange="MEXC",
-            bid=to_float(it.get("bid1")),
-            ask=to_float(it.get("ask1")),
-            last=to_float(it.get("lastPrice")),
-            vol24_usd=to_float(it.get("amount24")),
-            fund_rate=fund,
-            fund24_est=funding_24h_estimate(fund),
-            url=mexc_trade_url(symbol),
-            next_funding_ts=next_ts,
-            funding_interval_h=_pick_int(it, ["fundingInterval", "settleInterval", "collectCycle"], default=8),
-        )
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            symbol = str(it.get("symbol") or "")
+            if "_" not in symbol:
+                continue
+            base, quote = symbol.split("_", 1)
+            if quote.upper() != "USDT":
+                continue
+            fund = to_float(it.get("fundingRate"))
+            next_ts = _pick_ts(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
+            out[normalize_usdt(base)] = MarketRow(
+                exchange="MEXC",
+                bid=to_float(it.get("bid1")),
+                ask=to_float(it.get("ask1")),
+                last=to_float(it.get("lastPrice")),
+                vol24_usd=to_float(it.get("amount24")),
+                fund_rate=fund,
+                fund24_est=funding_24h_estimate(fund),
+                url=mexc_trade_url(symbol),
+                next_funding_ts=next_ts,
+                funding_interval_h=_pick_int(it, ["fundingInterval", "settleInterval", "collectCycle"], default=8),
+            )
+    except Exception as e:
+        print(f"MEXC load error: {type(e).__name__}: {e}")
+        return {}
     return out
 
 
 async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
-    data = await fetch_json(session, BYBIT_TICKERS, params={"category": "linear"})
-    items = data.get("result", {}).get("list", []) if isinstance(data, dict) else []
-    if not isinstance(items, list):
-        return out
+    try:
+        data = await fetch_json(session, BYBIT_TICKERS, params={"category": "linear"})
+        items = data.get("result", {}).get("list", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            return out
 
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        symbol = str(it.get("symbol") or "").upper()
-        if not symbol.endswith("USDT"):
-            continue
-        fund = to_float(it.get("fundingRate"))
-        next_ts = _pick_ts(it, ["nextFundingTime", "nextFundingTimestamp"])
-        out[symbol] = MarketRow(
-            exchange="Bybit",
-            bid=to_float(it.get("bid1Price") or it.get("bidPrice")),
-            ask=to_float(it.get("ask1Price") or it.get("askPrice")),
-            last=to_float(it.get("lastPrice")),
-            vol24_usd=to_float(it.get("turnover24h") or it.get("turnover24H") or it.get("volume24h")),
-            fund_rate=fund,
-            fund24_est=funding_24h_estimate(fund),
-            url=bybit_trade_url(symbol),
-            next_funding_ts=next_ts,
-            funding_interval_h=_pick_int(it, ["fundingIntervalHour", "fundingInterval", "fundingIntervalHours"], default=8),
-        )
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            symbol = str(it.get("symbol") or "").upper()
+            if not symbol.endswith("USDT"):
+                continue
+            fund = to_float(it.get("fundingRate"))
+            next_ts = _pick_ts(it, ["nextFundingTime", "nextFundingTimestamp"])
+            out[symbol] = MarketRow(
+                exchange="Bybit",
+                bid=to_float(it.get("bid1Price") or it.get("bidPrice")),
+                ask=to_float(it.get("ask1Price") or it.get("askPrice")),
+                last=to_float(it.get("lastPrice")),
+                vol24_usd=to_float(it.get("turnover24h") or it.get("turnover24H") or it.get("volume24h")),
+                fund_rate=fund,
+                fund24_est=funding_24h_estimate(fund),
+                url=bybit_trade_url(symbol),
+                next_funding_ts=next_ts,
+                funding_interval_h=_pick_int(it, ["fundingIntervalHour", "fundingInterval", "fundingIntervalHours"], default=8),
+            )
+    except Exception as e:
+        print(f"Bybit load error: {type(e).__name__}: {e}")
+        return {}
     return out
 
 
 async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
-    dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
-    contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
-    contracts = _as_list(contracts_resp)
+    try:
+        dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
+        contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
+        contracts = _as_list(contracts_resp)
 
-    norm_to_raw: Dict[str, str] = {}
-    contract_by_raw: Dict[str, dict] = {}
-    for c in contracts:
-        raw = str(c.get("symbol") or "")
-        if not raw:
-            continue
-        contract_by_raw[raw] = c
-        if "-" in raw:
-            base, quote = raw.split("-", 1)
-            if quote.upper() == "USDT":
-                norm_to_raw[normalize_usdt(base)] = raw
-        else:
-            upper_raw = raw.upper()
-            if upper_raw.endswith("USDT"):
-                norm_to_raw[upper_raw] = raw
+        norm_to_raw: Dict[str, str] = {}
+        contract_by_raw: Dict[str, dict] = {}
+        for c in contracts:
+            raw = str(c.get("symbol") or "")
+            if not raw:
+                continue
+            contract_by_raw[raw] = c
+            if "-" in raw:
+                base, quote = raw.split("-", 1)
+                if quote.upper() == "USDT":
+                    norm_to_raw[normalize_usdt(base)] = raw
+            else:
+                upper_raw = raw.upper()
+                if upper_raw.endswith("USDT"):
+                    norm_to_raw[upper_raw] = raw
 
-    selected = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
-    if len(selected) < 120:
-        for s in norm_to_raw:
-            if s not in selected:
-                selected.append(s)
-            if len(selected) >= MAX_BINGX_SYMBOLS:
-                break
+        selected = [s for s in candidate_norm if s in norm_to_raw][:MAX_BINGX_SYMBOLS]
+        if len(selected) < 120:
+            for s in norm_to_raw:
+                if s not in selected:
+                    selected.append(s)
+                if len(selected) >= MAX_BINGX_SYMBOLS:
+                    break
 
-    sem = asyncio.Semaphore(BINGX_CONCURRENCY)
-    dbg["selected"] = len(selected)
-    bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
-        fetch_json(session, BINGX_BOOK_TICKER),
-        fetch_json(session, BINGX_TICKER_24H),
-        fetch_json(session, BINGX_PREMIUM_INDEX),
-        return_exceptions=True,
-    )
-    bulk_book: Dict[str, dict] = {}
-    bulk_tick: Dict[str, dict] = {}
-    bulk_prem: Dict[str, dict] = {}
-    if not isinstance(bulk_book_resp, Exception):
-        bulk_book = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_book_resp)}
-    if not isinstance(bulk_tick_resp, Exception):
-        bulk_tick = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_tick_resp)}
-    if not isinstance(bulk_prem_resp, Exception):
-        bulk_prem = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_prem_resp)}
+        sem = asyncio.Semaphore(BINGX_CONCURRENCY)
+        dbg["selected"] = len(selected)
+        bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
+            fetch_json(session, BINGX_BOOK_TICKER),
+            fetch_json(session, BINGX_TICKER_24H),
+            fetch_json(session, BINGX_PREMIUM_INDEX),
+            return_exceptions=True,
+        )
+        bulk_book: Dict[str, dict] = {}
+        bulk_tick: Dict[str, dict] = {}
+        bulk_prem: Dict[str, dict] = {}
+        if not isinstance(bulk_book_resp, Exception):
+            bulk_book = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_book_resp)}
+        if not isinstance(bulk_tick_resp, Exception):
+            bulk_tick = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_tick_resp)}
+        if not isinstance(bulk_prem_resp, Exception):
+            bulk_prem = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_prem_resp)}
 
-    async def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
-        raw = norm_to_raw.get(norm_sym)
-        if not raw:
-            return None
-        contract = contract_by_raw.get(raw, {})
+        async def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
+            raw = norm_to_raw.get(norm_sym)
+            if not raw:
+                return None
+            contract = contract_by_raw.get(raw, {})
 
-        async def fetch_symbol(url: str) -> dict:
-            variants = [raw]
-            compact = raw.replace("-", "")
-            undersc = raw.replace("-", "_")
-            for v in (compact, undersc):
-                if v not in variants:
-                    variants.append(v)
-            for sym in variants:
-                resp = await fetch_json(session, url, params={"symbol": sym})
-                lst = _as_list(resp)
-                if lst:
-                    rec = _match_symbol_entry(lst, variants)
-                    if rec:
-                        return rec
-            return {}
+            async def fetch_symbol(url: str) -> dict:
+                variants = [raw]
+                compact = raw.replace("-", "")
+                undersc = raw.replace("-", "_")
+                for v in (compact, undersc):
+                    if v not in variants:
+                        variants.append(v)
+                for sym in variants:
+                    resp = await fetch_json(session, url, params={"symbol": sym})
+                    lst = _as_list(resp)
+                    if lst:
+                        rec = _match_symbol_entry(lst, variants)
+                        if rec:
+                            return rec
+                return {}
 
-        try:
-            raw_key = normalize_symbol_key(raw)
-            book = dict(bulk_book.get(raw_key, {}))
-            tick = dict(bulk_tick.get(raw_key, {}))
-            prem = dict(bulk_prem.get(raw_key, {}))
+            try:
+                raw_key = normalize_symbol_key(raw)
+                book = dict(bulk_book.get(raw_key, {}))
+                tick = dict(bulk_tick.get(raw_key, {}))
+                prem = dict(bulk_prem.get(raw_key, {}))
 
-            used_fallback = False
-            if not (book and tick):
-                used_fallback = True
-                async with sem:
-                    fb, ft, fp = await asyncio.gather(
-                        fetch_symbol(BINGX_BOOK_TICKER),
-                        fetch_symbol(BINGX_TICKER_24H),
-                        fetch_symbol(BINGX_PREMIUM_INDEX),
-                        return_exceptions=True,
-                    )
-                if isinstance(fb, dict) and fb:
-                    book = fb
-                if isinstance(ft, dict) and ft:
-                    tick = ft
-                if isinstance(fp, dict) and fp:
-                    prem = fp
+                used_fallback = False
+                if not (book and tick):
+                    used_fallback = True
+                    async with sem:
+                        fb, ft, fp = await asyncio.gather(
+                            fetch_symbol(BINGX_BOOK_TICKER),
+                            fetch_symbol(BINGX_TICKER_24H),
+                            fetch_symbol(BINGX_PREMIUM_INDEX),
+                            return_exceptions=True,
+                        )
+                    if isinstance(fb, dict) and fb:
+                        book = fb
+                    if isinstance(ft, dict) and ft:
+                        tick = ft
+                    if isinstance(fp, dict) and fp:
+                        prem = fp
 
-            bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
-            ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
-            if not is_pos(bid):
-                bid = _pick_float(tick, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
-            if not is_pos(ask):
-                ask = _pick_float(tick, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
-            last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
+                bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
+                ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
+                if not is_pos(bid):
+                    bid = _pick_float(tick, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
+                if not is_pos(ask):
+                    ask = _pick_float(tick, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
+                last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
 
-            vol_quote = _pick_float(tick, [
-                "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H",
-                "amountQuote", "volumeQuote",
-            ])
-            vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "baseQty", "amount", "vol", "amountBase", "volumeBase", "volume24h"])
-            vol = vol_quote
-            if not is_pos(vol):
-                price = last if is_pos(last) else (bid + ask) / 2 if is_pos(bid) and is_pos(ask) else math.nan
-                if is_pos(vol_base) and is_pos(price):
-                    vol = vol_base * price
-            if not is_pos(vol):
-                vol = _pick_float(contract, ["quoteVolume", "quoteVolume24h", "turnover", "turnover24h", "amount24", "volumeQuote"])
+                vol_quote = _pick_float(tick, [
+                    "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H",
+                    "amountQuote", "volumeQuote",
+                ])
+                vol_base = _pick_float(tick, ["volume", "baseVolume", "qty", "baseQty", "amount", "vol", "amountBase", "volumeBase", "volume24h"])
+                vol = vol_quote
+                if not is_pos(vol):
+                    price = last if is_pos(last) else (bid + ask) / 2 if is_pos(bid) and is_pos(ask) else math.nan
+                    if is_pos(vol_base) and is_pos(price):
+                        vol = vol_base * price
+                if not is_pos(vol):
+                    vol = _pick_float(contract, ["quoteVolume", "quoteVolume24h", "turnover", "turnover24h", "amount24", "volumeQuote"])
 
-            fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
-            if not math.isfinite(fund):
-                fund = _pick_float(tick, ["fundingRate", "lastFundingRate", "funding"])
-            next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
-            if not math.isfinite(next_ts):
-                next_ts = _pick_ts(contract, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
+                fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
+                if not math.isfinite(fund):
+                    fund = _pick_float(tick, ["fundingRate", "lastFundingRate", "funding"])
+                next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
+                if not math.isfinite(next_ts):
+                    next_ts = _pick_ts(contract, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
 
-            if not (is_pos(bid) and is_pos(ask)):
-                dbg["rejected_no_quote"] += 1
+                if not (is_pos(bid) and is_pos(ask)):
+                    dbg["rejected_no_quote"] += 1
+                    return None
+
+                if used_fallback:
+                    dbg["from_fallback"] += 1
+                else:
+                    dbg["from_bulk"] += 1
+
+                return norm_sym, MarketRow(
+                    exchange="BingX",
+                    bid=bid,
+                    ask=ask,
+                    last=last,
+                    vol24_usd=vol,
+                    fund_rate=fund,
+                    fund24_est=funding_24h_estimate(fund),
+                    url=bingx_trade_url(raw),
+                    next_funding_ts=next_ts,
+                    funding_interval_h=_pick_int(
+                        prem if prem else contract,
+                        ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"],
+                        default=8,
+                    ),
+                )
+            except Exception:
                 return None
 
-            if used_fallback:
-                dbg["from_fallback"] += 1
-            else:
-                dbg["from_bulk"] += 1
-
-            return norm_sym, MarketRow(
-                exchange="BingX",
-                bid=bid,
-                ask=ask,
-                last=last,
-                vol24_usd=vol,
-                fund_rate=fund,
-                fund24_est=funding_24h_estimate(fund),
-                url=bingx_trade_url(raw),
-                next_funding_ts=next_ts,
-                funding_interval_h=_pick_int(
-                    prem if prem else contract,
-                    ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"],
-                    default=8,
-                ),
-            )
-        except Exception:
-            return None
-
-    res = await asyncio.gather(*[one(s) for s in selected], return_exceptions=True)
-    for item in res:
-        if isinstance(item, tuple):
-            out[item[0]] = item[1]
-    print(
-        f"[BingX] selected={dbg['selected']} ok={len(out)} "
-        f"bulk={dbg['from_bulk']} fallback={dbg['from_fallback']} rejected={dbg['rejected_no_quote']}"
-    )
-    return out
+        res = await asyncio.gather(*[one(s) for s in selected], return_exceptions=True)
+        for item in res:
+            if isinstance(item, tuple):
+                out[item[0]] = item[1]
+        print(
+            f"[BingX] selected={dbg['selected']} ok={len(out)} "
+            f"bulk={dbg['from_bulk']} fallback={dbg['from_fallback']} rejected={dbg['rejected_no_quote']}"
+        )
+        return out
+    except Exception as e:
+        print(f"BingX load error: {type(e).__name__}: {e}")
+        return {}
 
 
 def exec_spread(buy: MarketRow, sell: MarketRow) -> float:

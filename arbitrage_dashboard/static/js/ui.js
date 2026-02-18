@@ -33,3 +33,13 @@ export function parseVolInput(raw) {
   if (q === 'b') return n * 1e9;
   return n;
 }
+
+export function parsePctInput(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  const normalized = s.replace('%', '').replace(',', '.').trim();
+  if (!normalized) return null;
+  const n = Number.parseFloat(normalized);
+  if (!Number.isFinite(n)) return null;
+  return n / 100;
+}

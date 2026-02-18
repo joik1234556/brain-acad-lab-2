@@ -149,6 +149,28 @@ pip install -r requirements.txt
 uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
+
+### Быстрый запуск на macOS (double-click)
+
+Добавлен файл `run_local.command` в корне проекта.
+
+1. В Finder откройте папку `arbitrage_dashboard`.
+2. Дважды кликните `run_local.command`.
+3. Скрипт автоматически:
+   - выберет `python3.11` (или fallback на `python3`),
+   - создаст/активирует `venv`,
+   - обновит `pip`,
+   - установит зависимости,
+   - запустит `uvicorn app:app --reload --host 127.0.0.1 --port 8000`.
+
+После запуска откройте: `http://127.0.0.1:8000`
+Остановка: `Ctrl+C` в окне терминала.
+
+### Зависимости
+
+- `requirements.txt` — только runtime-зависимости (prod).
+- `requirements-dev.txt` — dev-инструменты (`ruff`, `mypy`, `pytest`, `black` и др.) поверх runtime.
+
 ### Переключение окружений через ENV
 
 - `ENV=development` — dev-режим (`reload=True`, access logs включены).

@@ -1,5 +1,5 @@
 import { apiGet, apiPost } from './api.js';
-import { fmtPct, fmtPrice, fmtUsd, parseVolInput, spreadPillClass } from './ui.js';
+import { fmtPct, fmtPrice, fmtUsd, parsePctInput, parseVolInput, spreadPillClass } from './ui.js';
 
 const state = {
   data: { rows: [], dbg: {} },
@@ -45,7 +45,8 @@ function activeExchanges() {
 function filteredRows(rows) {
   const q = (els.search.value || '').trim().toUpperCase();
   const minVol = parseVolInput(els.minVol.value || '0');
-  const minSpread = Math.max(0, Number.parseFloat(els.minSpread.value || '0')) / 100;
+  const parsedSpread = parsePctInput(els.minSpread.value || '');
+  const minSpread = parsedSpread === null ? 0 : parsedSpread;
   const exSet = activeExchanges();
 
   return rows.filter(r => {
@@ -143,6 +144,11 @@ async function loadData() {
 
 function bindUi() {
   [els.search, els.minVol, els.minSpread].forEach(el => el.addEventListener('input', render));
+  els.minSpread.addEventListener('change', () => {
+    const parsed = parsePctInput(els.minSpread.value);
+    els.minSpread.value = parsed === null ? '' : `${(parsed * 100).toString().replace('.', ',')}%`;
+    render();
+  });
   els.exchChecks.forEach(el => el.addEventListener('change', render));
 
   els.reset.addEventListener('click', () => {
