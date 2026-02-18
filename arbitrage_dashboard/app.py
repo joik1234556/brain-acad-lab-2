@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import uvicorn
 
 if getattr(sys, "frozen", False):
@@ -36,6 +37,8 @@ def app_dir() -> str:
 
 BASE_DIR = app_dir()
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 LOGOS_DIR = os.path.join(ASSETS_DIR, "logos")
 SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
@@ -674,6 +677,8 @@ async def lifespan(_: FastAPI):
 ensure_assets()
 app = FastAPI(lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 CFG = load_config()
 CACHE = {"updated_at": None, "rows": [], "dbg": {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}}
 CACHE_LOCK = asyncio.Lock()
@@ -928,8 +933,8 @@ async def updater_loop():
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTML_PAGE
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/api/config")

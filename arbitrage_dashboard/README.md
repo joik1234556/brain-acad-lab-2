@@ -99,6 +99,64 @@ Forwarding  https://abc12345.ngrok-free.app -> http://localhost:8000
 
 Эту `https://...ngrok-free.app` ссылку можно открыть из интернета.
 
+## Новая структура UI (поддерживаемый фронтенд)
+
+Теперь UI разделён по файлам, чтобы не ломался при будущих правках:
+
+```text
+arbitrage_dashboard/
+  templates/
+    base.html
+    index.html
+    components/
+      header.html
+      sidebar.html
+  static/
+    css/
+      main.css
+    js/
+      api.js
+      ui.js
+      app.js
+```
+
+- `templates/*` — HTML шаблоны и layout.
+- `static/css/main.css` — все стили и состояния кнопок/таблиц/cards.
+- `static/js/api.js` — только работа с API.
+- `static/js/ui.js` — форматирование и UI-хелперы.
+- `static/js/app.js` — клиентская логика (polling, фильтры, сортировка, обновление таблицы).
+
+## Как запустить локально
+
+```bash
+cd arbitrage_dashboard
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+uvicorn app:app --reload --port 8000
+```
+
+Откройте: `http://127.0.0.1:8000`
+
+## Как менять дизайн сайта
+
+1. **Layout и блоки страницы**
+   - меняйте `templates/base.html` и `templates/index.html`.
+2. **Переиспользуемые элементы (header/sidebar)**
+   - меняйте файлы в `templates/components/`.
+3. **Стили**
+   - меняйте `static/css/main.css`.
+4. **Логика таблицы/фильтров/автообновления**
+   - меняйте `static/js/app.js`.
+5. **API слой**
+   - меняйте `static/js/api.js`.
+
+## Поведение UI
+
+- Автообновление данных каждые 5 секунд без перезагрузки страницы.
+- Обновляются только строки таблицы (через patch), UI не перерисовывается полностью.
+- Есть индикатор статуса обновления, время последнего обновления и banner ошибки API.
+
 ## Ошибка Codex про обновление PR
 
 Если видите сообщение:
