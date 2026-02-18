@@ -934,7 +934,8 @@ async def updater_loop():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    _ = request
+    return HTML_PAGE
 
 
 @app.get("/api/config")
