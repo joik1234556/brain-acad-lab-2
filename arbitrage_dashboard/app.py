@@ -527,6 +527,7 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
             fund_spread = sell.fund_rate - buy.fund_rate if math.isfinite(sell.fund_rate) and math.isfinite(buy.fund_rate) else math.nan
             out.append({
                 "spread": spread,
+                "pair_key": "",
                 "buy_ex": buy.exchange,
                 "sell_ex": sell.exchange,
                 "buy_ask": buy.ask,
@@ -593,17 +594,26 @@ def _save_users(users: Dict[str, Any]) -> None:
 
 
 def _seed_admin(users: Dict[str, Any]) -> None:
-    if "admin" in users:
-        return
-    salt, pwh = _make_password_record("salimonenkodima")
-    users["admin"] = {
-        "username": "admin",
-        "salt": salt,
-        "password_hash": pwh,
-        "is_admin": True,
-        "subscription_approved": True,
-        "created_at": int(time.time()),
-    }
+    if "admin" not in users:
+        salt, pwh = _make_password_record("salimonenkodima")
+        users["admin"] = {
+            "username": "admin",
+            "salt": salt,
+            "password_hash": pwh,
+            "is_admin": True,
+            "subscription_approved": True,
+            "created_at": int(time.time()),
+        }
+    if "adminegor" not in users:
+        salt2, pwh2 = _make_password_record("egorkorotkov96!")
+        users["adminegor"] = {
+            "username": "adminegor",
+            "salt": salt2,
+            "password_hash": pwh2,
+            "is_admin": True,
+            "subscription_approved": True,
+            "created_at": int(time.time()),
+        }
 
 
 def _load_users() -> Dict[str, Any]:
@@ -682,6 +692,8 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 CFG = load_config()
 CACHE = {"updated_at": None, "rows": [], "dbg": {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}}
 CACHE_LOCK = asyncio.Lock()
+PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
+PAIR_HISTORY_MAX = 300
 
 HTML_PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Dashboard</title>
@@ -719,17 +731,17 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 @media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
 </style></head><body class="theme-classic"><div class="wrap">
 <div class="filter-card"><div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div>
-<div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск по началу токена</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="number" min="0" step="0.01"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
-<div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="clearExBtn">Очистить</button></div><div class="chips" id="exchangeBox"></div></div>
+<div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
+<div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
 <div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: доступ до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
-<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th></tr></thead><tbody id="tbody"><tr><td colspan="9">Загрузка...</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
-let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedSymbols')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
+let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
 const I18N={ru:{filterTitle:'Фильтр',search:'Поиск по началу токена',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
@@ -791,18 +803,19 @@ function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase()
 
 function logoFor(ex){return STATE.assets.logos?.[ex]||FALLBACK_LOGO[ex]||'';}
 function applyTheme(){document.body.className=STATE.theme; document.getElementById('themeSel').value=STATE.theme; localStorage.setItem('theme',STATE.theme);}
-function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('clearExBtn').textContent=t.clear; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang);}
+function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang);}
 function setCooldown(sec){cooldown=sec; const btn=document.getElementById('refreshBtn'); if(timerId)clearInterval(timerId); timerId=setInterval(()=>{cooldown=Math.max(0,cooldown-1); btn.disabled=cooldown>0; btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh'; document.getElementById('cooldownBadge').textContent=`Manual refresh cooldown: ${cooldown}s`; if(cooldown===0){clearInterval(timerId);timerId=null;}},1000); btn.disabled=true; btn.textContent=`↻ Refresh (${cooldown})`;}
-function isPinned(s){return STATE.pinned.has(s)}
-function togglePinned(s){if(STATE.pinned.has(s))STATE.pinned.delete(s); else STATE.pinned.add(s); localStorage.setItem('pinnedSymbols',JSON.stringify([...STATE.pinned])); render();}
+function pairKey(r){return `${r.symbol}|${r.buy_ex}|${r.sell_ex}`;}
+function isPinnedPair(r){return STATE.pinned.has(pairKey(r));}
+function togglePinnedPair(r){const k=pairKey(r); if(STATE.pinned.has(k))STATE.pinned.delete(k); else STATE.pinned.add(k); localStorage.setItem('pinnedPairs',JSON.stringify([...STATE.pinned])); render();}
 function refreshSortIndicators(){document.querySelectorAll('th.sortable').forEach(th=>{const key=th.getAttribute('data-sort'); th.querySelector('.arr').textContent=(key===STATE.sortKey)?(STATE.sortDir==='asc'?'▲':'▼'):'↕';});}
 
 function renderExchangeFilters(){const box=document.getElementById('exchangeBox'); box.innerHTML=''; ['MEXC','Bybit','BingX'].forEach(ex=>{const chip=document.createElement('label'); const on=!!STATE.config.enabled?.[ex]; chip.className='chip'+(on?'':' off'); const logo=logoFor(ex); chip.innerHTML=`<input type="checkbox" ${on?'checked':''}/> ${logo?`<img src="${logo}" alt="${ex}"/>`:''} ${ex}`; chip.onclick=async (e)=>{e.preventDefault(); const en={...(STATE.config.enabled||{})}; en[ex]=!en[ex]; STATE.config=await apiPost('/api/config',{enabled:en}); renderExchangeFilters(); await refreshData();}; box.appendChild(chip);});}
 function clearExchangeFilters(){STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
-function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; localStorage.setItem('minVolInput','0'); document.getElementById('minSpread').value='0'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
+function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; localStorage.setItem('minVolInput','0'); document.getElementById('minSpread').value='0%'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
 
-function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parseFloat(document.getElementById('minSpread').value||'0')/100; return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
-function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinned(a.symbol)?1:0; const pb=isPinned(b.symbol)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
+function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parsePctInput(document.getElementById('minSpread').value||'0'); return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
+function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinnedPair(a)?1:0; const pb=isPinnedPair(b)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
 function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'fpos';}
 
 async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){const a=new Audio(`/assets/sounds/${encodeURIComponent(STATE.soundFile)}`); a.volume=0.8; await a.play(); return;} }catch(_e){} try{const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='triangle'; o.frequency.value=920; g.gain.setValueAtTime(0.0001,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14); o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(_e2){} }
@@ -812,20 +825,20 @@ if(!STATE.data)return;
 const srvLimit=(STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit))?STATE.data.access.spread_limit:null;
 if(srvLimit!==null){STATE.data.rows=(STATE.data.rows||[]).filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
 document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
-document.getElementById('dbg').textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`;
+const dbgEl=document.getElementById('dbg'); if(STATE.user&&STATE.user.is_admin){dbgEl.style.display='inline-block'; dbgEl.textContent=`DBG mexc=${STATE.data.dbg.mexc} bybit=${STATE.data.dbg.bybit} bingx=${STATE.data.dbg.bingx} kept=${STATE.data.dbg.kept} took=${STATE.data.dbg.took_ms}ms`;} else {dbgEl.style.display='none';}
 let rows=applyFilters([...(STATE.data.rows||[])]);
 sortRows(rows);
 refreshSortIndicators();
 const tb=document.getElementById('tbody');
 tb.innerHTML='';
-if(!rows.length){tb.innerHTML='<tr><td colspan="9">Ничего не найдено.</td></tr>'; return;}
+if(!rows.length){tb.innerHTML='<tr><td colspan="10">Ничего не найдено.</td></tr>'; return;}
 const top=rows[0];
 const key=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
 if(key!==LAST_ALERT){LAST_ALERT=key; playAlert();}
 
 const split=(a,b,extra='')=>`<td class='split-cell mono ${extra}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
 rows.forEach(r=>{
-  const pin=isPinned(r.symbol);
+  const pin=isPinnedPair(r);
   const tr=document.createElement('tr');
   if(pin)tr.classList.add('pinned');
   const lbuy=logoFor(r.buy_ex);
@@ -843,26 +856,28 @@ rows.forEach(r=>{
     <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
     <td><span class='spread-pill'>${fmtPct(r.spread,2)}</span></td>
     ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol))}
+    <td><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}'>Grafic</a></td>
   `;
-  tr.querySelector('.fav').onclick=()=>togglePinned(r.symbol);
+  tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
   tb.appendChild(tr);
 });
 }
 
 async function refreshData(){STATE.data=await apiGet('/api/data'); render();}
 
-async function boot(){STATE.config=await apiGet('/api/config'); await loadMe(); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=localStorage.getItem('minVolInput')||String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100); document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang(); renderAuth();
+async function boot(){STATE.config=await apiGet('/api/config'); await loadMe(); STATE.data=await apiGet('/api/data'); STATE.assets=await apiGet('/api/assets'); document.getElementById('minVol').value=localStorage.getItem('minVolInput')||String(STATE.config.min_vol||0); document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100)+'%'; document.getElementById('soundToggle').checked=STATE.sound; applyTheme(); applyLang(); renderAuth();
 const ss=document.getElementById('soundSel'); ss.innerHTML=''; (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);}); if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} renderExchangeFilters(); render();
 
 document.getElementById('q').addEventListener('input',render);
 document.getElementById('minVol').addEventListener('change',async e=>{const raw=(e.target.value||'0').trim(); const v=Math.max(0,parseVolumeInput(raw)); localStorage.setItem('minVolInput',raw||'0'); STATE.config=await apiPost('/api/config',{min_vol:v}); await refreshData();});
-document.getElementById('minSpread').addEventListener('change',async e=>{const v=Math.max(0,parseFloat(e.target.value||'0'))/100; STATE.config=await apiPost('/api/config',{min_spread:v}); await refreshData();});
+function parsePctInput(v){const t=String(v||'').replace('%','').replace(',','.').trim(); const n=parseFloat(t||'0'); return Math.max(0,n)/100;}
+document.getElementById('minSpread').addEventListener('change',async e=>{const v=parsePctInput(e.target.value||'0'); e.target.value=(v*100).toFixed(2).replace(/\.00$/,'')+'%'; STATE.config=await apiPost('/api/config',{min_spread:v}); await refreshData();});
 document.getElementById('themeSel').addEventListener('change',e=>{STATE.theme=e.target.value; applyTheme();});
 document.getElementById('langSel').addEventListener('change',e=>{STATE.lang=e.target.value; applyLang(); render();});
 document.getElementById('soundToggle').addEventListener('change',e=>{STATE.sound=!!e.target.checked; localStorage.setItem('soundOn',STATE.sound?'1':'0'); if(STATE.sound) playAlert();});
 document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
 document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); await apiPost('/api/refresh',{}); await refreshData();});
-document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters); document.getElementById('clearExBtn').addEventListener('click',clearExchangeFilters);
+document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters);
 document.getElementById('btnRegister').addEventListener('click',()=>openAuthForm('register')); document.getElementById('btnLogin').addEventListener('click',()=>openAuthForm('login')); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnAuthCancel').addEventListener('click',closeAuthForm); document.getElementById('btnAuthSubmit').addEventListener('click',async()=>{if(STATE.authMode==='register') await registerUser(); else await loginUser();}); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
 document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
 setInterval(refreshData,Math.max(1000,(STATE.config.refresh_sec||5)*1000)); }
@@ -902,12 +917,31 @@ async def compute_once() -> Dict[str, Any]:
         if not pairs:
             continue
         for best in pairs:
-            if best["spread"] < min_spread:
+            if min_spread > 0 and best["spread"] < min_spread:
                 continue
             best["symbol"] = symbol
+            best["pair_key"] = f"{symbol}|{best['buy_ex']}|{best['sell_ex']}"
             rows_out.append(best)
 
     rows_out.sort(key=lambda row: row["spread"], reverse=True)
+    now_ts = int(time.time())
+    for r in rows_out:
+        k = r.get("pair_key")
+        if not k:
+            continue
+        h = PAIR_HISTORY.setdefault(k, [])
+        h.append({
+            "ts": now_ts,
+            "spread": float(r.get("spread") or 0.0),
+            "buy_price": float(r.get("buy_ask") or math.nan),
+            "sell_price": float(r.get("sell_bid") or math.nan),
+            "buy_ex": r.get("buy_ex"),
+            "sell_ex": r.get("sell_ex"),
+            "symbol": r.get("symbol"),
+        })
+        if len(h) > PAIR_HISTORY_MAX:
+            del h[:-PAIR_HISTORY_MAX]
+
     return {
         "updated_at": time.strftime("%H:%M:%S"),
         "rows": rows_out,
@@ -988,6 +1022,55 @@ async def api_data(request: Request):
         "spread_limit": spread_limit,
     }
     return JSONResponse(data)
+
+
+@app.get("/api/pair")
+async def api_pair(request: Request, pair_key: str):
+    user = _session_user(request)
+    rows = list(CACHE.get("rows", []))
+    row = next((x for x in rows if x.get("pair_key") == pair_key), None)
+    if not row:
+        return JSONResponse({"ok": False, "error": "pair_not_found"}, status_code=404)
+    filtered_rows, spread_limit, _is_admin, _is_paid = _limit_rows_for_access([row], user)
+    if not filtered_rows:
+        return JSONResponse({"ok": False, "error": "forbidden_by_tier", "spread_limit": spread_limit}, status_code=403)
+    hist = PAIR_HISTORY.get(pair_key, [])
+    return JSONResponse({"ok": True, "row": filtered_rows[0], "history": hist[-PAIR_HISTORY_MAX:]})
+
+
+GRAPH_PAGE = r"""
+<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Grafic</title><style>
+body{font-family:Inter,Arial;margin:0;background:#0f172a;color:#e2e8f0}.wrap{max-width:1100px;margin:0 auto;padding:16px}
+.card{background:#111827;border:1px solid #334155;border-radius:12px;padding:12px;margin-bottom:12px}
+input{background:#0b1220;border:1px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px}
+canvas{background:#0b1220;border:1px solid #334155;border-radius:10px;width:100%;height:340px}
+</style></head><body><div class='wrap'>
+<div class='card'><a href='/' style='color:#93c5fd'>&larr; Back</a> <strong id='title'>Grafic</strong><div id='meta'></div></div>
+<div class='card'>
+Entry Buy: <input id='entryBuy' type='number' step='any'>
+Entry Sell: <input id='entrySell' type='number' step='any'>
+Leverage: <input id='lev' type='number' step='1' value='1'>
+<span id='pnl'></span>
+</div>
+<div class='card'><canvas id='cv' width='1050' height='340'></canvas></div>
+</div>
+<script>
+const qp=new URLSearchParams(location.search); const pair_key=qp.get('pair_key')||'';
+const cv=document.getElementById('cv'); const cx=cv.getContext('2d');
+function line(points,color,minY,maxY){if(points.length<2)return;cx.strokeStyle=color;cx.beginPath();points.forEach((p,i)=>{const x=i*(cv.width/(points.length-1));const y=cv.height-((p-minY)/(maxY-minY||1))*cv.height; if(i===0)cx.moveTo(x,y); else cx.lineTo(x,y);});cx.stroke();}
+function draw(h){cx.clearRect(0,0,cv.width,cv.height); const b=h.map(x=>x.buy_price).filter(Number.isFinite); const s=h.map(x=>x.sell_price).filter(Number.isFinite); const all=b.concat(s); if(!all.length) return; const minY=Math.min(...all), maxY=Math.max(...all); line(b,'#22c55e',minY,maxY); line(s,'#ef4444',minY,maxY);}
+function updPnl(row){const eb=parseFloat(document.getElementById('entryBuy').value||'0');const es=parseFloat(document.getElementById('entrySell').value||'0');const lev=Math.max(1,parseFloat(document.getElementById('lev').value||'1')); if(!(eb>0&&es>0)) return; const pnl=((row.sell_bid-es)/es - (row.buy_ask-eb)/eb)*100*lev; document.getElementById('pnl').textContent=' PnL≈ '+pnl.toFixed(2)+'%';}
+async function load(){const r=await fetch('/api/pair?pair_key='+encodeURIComponent(pair_key),{cache:'no-store'}); const j=await r.json(); if(!j.ok){document.getElementById('meta').textContent='Error: '+(j.error||''); return;} const row=j.row; const h=j.history||[]; document.getElementById('title').textContent=`${row.symbol} ${row.buy_ex}->${row.sell_ex}`; document.getElementById('meta').textContent=`Spread: ${(row.spread*100).toFixed(2)}% | Buy: ${row.buy_ask} | Sell: ${row.sell_bid}`; draw(h); updPnl(row); document.getElementById('entryBuy').oninput=()=>updPnl(row); document.getElementById('entrySell').oninput=()=>updPnl(row); document.getElementById('lev').oninput=()=>updPnl(row);}
+setInterval(load,5000); load();
+</script></body></html>
+"""
+
+
+@app.get("/graph", response_class=HTMLResponse)
+async def graph_page(request: Request):
+    _ = request
+    return GRAPH_PAGE
 
 
 @app.post("/api/refresh")
