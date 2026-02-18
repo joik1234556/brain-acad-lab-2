@@ -1116,7 +1116,22 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
 
 
 def run():
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_config=None, access_log=False)
+    env = os.getenv("ENV", "production").strip().lower()
+    if env not in {"development", "production"}:
+        env = "production"
+
+    is_dev = env == "development"
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        reload=is_dev,
+        log_config=None,
+        access_log=is_dev,
+    )
 
 
 if __name__ == "__main__":

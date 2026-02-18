@@ -138,6 +138,39 @@ uvicorn app:app --reload --port 8000
 
 Откройте: `http://127.0.0.1:8000`
 
+## Local Development
+
+Рекомендуемый запуск для локальной разработки (Mac/Linux):
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --reload --host 127.0.0.1 --port 8000
+```
+
+### Переключение окружений через ENV
+
+- `ENV=development` — dev-режим (`reload=True`, access logs включены).
+- `ENV=production` — prod-режим (`reload=False`, access logs отключены).
+
+Пример:
+
+```bash
+ENV=development python app.py
+```
+
+или
+
+```bash
+ENV=production python app.py
+```
+
+### systemd / сервер
+
+Для сервера можно оставить `ENV=production` и задать `HOST`/`PORT` через environment variables.
+Пути в проекте относительные (от папки `arbitrage_dashboard`), абсолютные пути вида `/root/...` не используются.
+
 ## Как менять дизайн сайта
 
 1. **Layout и блоки страницы**
