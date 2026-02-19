@@ -682,9 +682,10 @@ def _session_user(request: Request) -> Optional[Dict[str, Any]]:
 
 def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> Tuple[List[dict], Optional[float], bool, bool]:
     is_admin = bool(user and user.get("is_admin"))
+    is_logged = bool(user)
     is_paid = bool(user and user.get("subscription_approved"))
     spread_limit: Optional[float] = None
-    if not (is_admin or is_paid):
+    if not is_logged:
         spread_limit = MAX_FREE_SPREAD
         rows = [r for r in rows if float(r.get("spread") or 0.0) <= spread_limit]
     return rows, spread_limit, is_admin, is_paid
@@ -718,9 +719,9 @@ body.theme-binance{--bg:#0f131c;--panel:#1a1f2a;--line:#333a46;--text:#f7f8fb;--
 body.theme-tradingview{--bg:#111827;--panel:#1f2937;--line:#374151;--text:#f9fafb;--muted:#9ca3af;--chip:#253244;--good:#22c55e;--bad:#ef4444;--link:#f9fafb}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;font-size:15px}
 .wrap{max-width:1600px;margin:0 auto;padding:12px}.filter-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px;margin-bottom:10px}
-.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
+.topbar{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:8px}.topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:170px}.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
 .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:8px 12px;border-radius:10px;font-size:14px;cursor:pointer;transition:all .15s ease}.btn:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}.btn:active{transform:translateY(0)}.btn[disabled]{opacity:.45;cursor:not-allowed}
-.filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}.lbl{font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:600}
+.filter-actions{display:flex;gap:8px;align-items:center}.filter-panel{display:none;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.filter-panel.open{display:block}.filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr;gap:10px;align-items:end}.lbl{font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:600}
 input,select{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
 body.theme-dark-blue select option, body.theme-binance select option, body.theme-tradingview select option{background:#1b2b45;color:#eaf2ff}
 .chips{display:flex;gap:8px;flex-wrap:wrap}.chip{display:inline-flex;align-items:center;gap:8px;background:var(--chip);border:1px solid var(--line);padding:6px 10px;border-radius:12px;font-size:14px;font-weight:600;transition:all .15s ease;cursor:pointer}.chip:hover{filter:brightness(1.08);border-color:var(--good)}.chip.off{opacity:.45}
@@ -739,14 +740,15 @@ tr:hover{background:rgba(120,130,150,.1)} .pinned{background:rgba(239,208,70,.16
 #authForm{display:none}
 .small{font-size:12px;color:var(--muted)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
-.spread-pill{display:inline-block;background:var(--good);padding:3px 8px;border-radius:8px;font-weight:800;color:#0f2817}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
-@media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
+.spread-pill{display:inline-block;padding:3px 8px;border-radius:8px;font-weight:800}.spread-pill.pos{background:var(--good);color:#0f2817}.spread-pill.neg{background:var(--bad);color:#2f0f0f}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
+@media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.topbar{justify-content:space-between}.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div>
-<div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblLang">Язык</div><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div><div><button class="btn" id="refreshBtn">↻ Refresh</button></div></div>
-<div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div></div><div class="chips" id="exchangeBox"></div></div>
+<div class="filter-card"><div class="topbar"><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
+<div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
+<div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
+<div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div></div>
+<div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="refreshBtn">↻ Refresh</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
-<div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: доступ до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
@@ -754,7 +756,7 @@ const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
 let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
-const I18N={ru:{filterTitle:'Фильтр',search:'Поиск по началу токена',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
+const I18N={ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
 const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
@@ -777,8 +779,8 @@ async function encryptWithPub(plain){
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
 function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('btnAuthSubmit').textContent=mode==='register'?'Зарегистрироваться':'Войти';}
 function closeAuthForm(){document.getElementById('authForm').style.display='none';}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/register',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} const r=await apiPost('/api/auth/login',{username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)}); if(!r.ok){setAuthStateText('Ошибка входа'); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText('Ошибка входа: '+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
 async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
@@ -796,7 +798,7 @@ function renderAuth(){
     bOut.style.display='none';
     return;
   }
-  const status=u.is_admin?'admin (без лимита)':(u.subscription_approved?'подписка активна (без лимита)':'без подписки (до 2%)');
+  const status=u.is_admin?'admin (без лимита)':'пользователь (без лимита)';
   setAuthStateText(`Пользователь: ${u.username} • ${status}`);
   adminBox.style.display=u.is_admin?'block':'none';
   bLogin.style.display='none';
@@ -829,6 +831,7 @@ function clearAllFilters(){document.getElementById('q').value=''; document.getEl
 function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parsePctInput(document.getElementById('minSpread').value||'0'); return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
 function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinnedPair(a)?1:0; const pb=isPinnedPair(b)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
 function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'fpos';}
+function spreadClass(v){if(!Number.isFinite(v)) return 'neg'; return v<0?'neg':'pos';}
 
 async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){const a=new Audio(`/assets/sounds/${encodeURIComponent(STATE.soundFile)}`); a.volume=0.8; await a.play(); return;} }catch(_e){} try{const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='triangle'; o.frequency.value=920; g.gain.setValueAtTime(0.0001,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14); o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(_e2){} }
 
@@ -866,9 +869,9 @@ rows.forEach(r=>{
     ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`)}
     ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--')}
     <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
-    <td><span class='spread-pill'>${fmtPct(r.spread,2)}</span></td>
+    <td><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
     ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol))}
-    <td><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}'>Grafic</a></td>
+    <td><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}' target='_blank' rel='noopener'>Grafic</a></td>
   `;
   tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
   tb.appendChild(tr);
@@ -894,6 +897,7 @@ function bindUiEvents(){
   document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
   document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); try{await apiPost('/api/refresh',{});}catch(err){console.error(err);} await refreshData();});
   document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters);
+  document.getElementById('filterToggleBtn').addEventListener('click',()=>{const p=document.getElementById('filterPanel'); const open=p.classList.toggle('open'); document.getElementById('filterToggleBtn').textContent=open?'Скрыть фильтр':'Показать фильтр';});
   document.getElementById('btnRegister').addEventListener('click',()=>openAuthForm('register')); document.getElementById('btnLogin').addEventListener('click',()=>openAuthForm('login')); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnAuthCancel').addEventListener('click',closeAuthForm); document.getElementById('btnAuthSubmit').addEventListener('click',async()=>{if(STATE.authMode==='register') await registerUser(); else await loginUser();}); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
   document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
 }
@@ -1131,11 +1135,14 @@ async def api_auth_pubkey():
 
 @app.post("/api/auth/register")
 async def api_auth_register(payload: Dict[str, Any]):
+    username = ""
+    password = ""
     try:
         username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
         password = _decrypt_client_field(str(payload.get("password_enc") or ""))
     except Exception:
-        return JSONResponse({"ok": False, "error": "invalid_encrypted_payload"}, status_code=400)
+        username = _normalize_username(str(payload.get("username") or ""))
+        password = str(payload.get("password") or "")
 
     if len(username) < 3 or len(password) < 6:
         return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=400)
@@ -1158,11 +1165,14 @@ async def api_auth_register(payload: Dict[str, Any]):
 
 @app.post("/api/auth/login")
 async def api_auth_login(payload: Dict[str, Any]):
+    username = ""
+    password = ""
     try:
         username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
         password = _decrypt_client_field(str(payload.get("password_enc") or ""))
     except Exception:
-        return JSONResponse({"ok": False, "error": "invalid_encrypted_payload"}, status_code=400)
+        username = _normalize_username(str(payload.get("username") or ""))
+        password = str(payload.get("password") or "")
 
     user = USERS.get(username)
     if not user or not _verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
