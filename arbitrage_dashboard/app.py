@@ -47,9 +47,10 @@ USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
 DEFAULT_REFRESH_SEC = 1
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
-HTTP_TIMEOUT = 12
+HTTP_TIMEOUT = 5
 MAX_BINGX_SYMBOLS = 260
 BINGX_CONCURRENCY = 18
+BINGX_CONTRACTS_TTL = 60.0
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
 MAX_FREE_SPREAD = 0.02
 SESSION_TTL_SEC = 7 * 24 * 3600
@@ -60,6 +61,19 @@ BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 BINGX_BOOK_TICKER = "https://open-api.bingx.com/openApi/swap/v2/quote/bookTicker"
 BINGX_TICKER_24H = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 BINGX_PREMIUM_INDEX = "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex"
+
+# Persistent HTTP session and caches for performance
+_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+_BINGX_CONTRACTS_CACHE: Dict[str, Any] = {"data": [], "ts": 0.0}
+_PREV_CANDIDATES: List[str] = []
+
+
+async def _get_http_session() -> aiohttp.ClientSession:
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None or _HTTP_SESSION.closed:
+        connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, enable_cleanup_closed=True)
+        _HTTP_SESSION = aiohttp.ClientSession(connector=connector)
+    return _HTTP_SESSION
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -347,11 +361,20 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
 
 
 async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) -> Dict[str, MarketRow]:
+    global _BINGX_CONTRACTS_CACHE
     out: Dict[str, MarketRow] = {}
     try:
-        dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
-        contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
-        contracts = _as_list(contracts_resp)
+        dbg = {"selected": 0, "from_bulk": 0, "rejected_no_quote": 0}
+
+        # Use cached contracts to avoid re-fetching every cycle
+        now_t = time.time()
+        if not _BINGX_CONTRACTS_CACHE["data"] or now_t - _BINGX_CONTRACTS_CACHE["ts"] >= BINGX_CONTRACTS_TTL:
+            contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
+            contracts = _as_list(contracts_resp)
+            _BINGX_CONTRACTS_CACHE["data"] = contracts
+            _BINGX_CONTRACTS_CACHE["ts"] = now_t
+        else:
+            contracts = _BINGX_CONTRACTS_CACHE["data"]
 
         norm_to_raw: Dict[str, str] = {}
         contract_by_raw: Dict[str, dict] = {}
@@ -377,7 +400,6 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 if len(selected) >= MAX_BINGX_SYMBOLS:
                     break
 
-        sem = asyncio.Semaphore(BINGX_CONCURRENCY)
         dbg["selected"] = len(selected)
         bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
             fetch_json(session, BINGX_BOOK_TICKER),
@@ -395,27 +417,11 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
         if not isinstance(bulk_prem_resp, Exception):
             bulk_prem = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_prem_resp)}
 
-        async def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
+        def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
             raw = norm_to_raw.get(norm_sym)
             if not raw:
                 return None
             contract = contract_by_raw.get(raw, {})
-
-            async def fetch_symbol(url: str) -> dict:
-                variants = [raw]
-                compact = raw.replace("-", "")
-                undersc = raw.replace("-", "_")
-                for v in (compact, undersc):
-                    if v not in variants:
-                        variants.append(v)
-                for sym in variants:
-                    resp = await fetch_json(session, url, params={"symbol": sym})
-                    lst = _as_list(resp)
-                    if lst:
-                        rec = _match_symbol_entry(lst, variants)
-                        if rec:
-                            return rec
-                return {}
 
             try:
                 raw_key = normalize_symbol_key(raw)
@@ -423,22 +429,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 tick = dict(bulk_tick.get(raw_key, {}))
                 prem = dict(bulk_prem.get(raw_key, {}))
 
-                used_fallback = False
+                # Only use bulk data - skip per-symbol fallback for performance
                 if not (book and tick):
-                    used_fallback = True
-                    async with sem:
-                        fb, ft, fp = await asyncio.gather(
-                            fetch_symbol(BINGX_BOOK_TICKER),
-                            fetch_symbol(BINGX_TICKER_24H),
-                            fetch_symbol(BINGX_PREMIUM_INDEX),
-                            return_exceptions=True,
-                        )
-                    if isinstance(fb, dict) and fb:
-                        book = fb
-                    if isinstance(ft, dict) and ft:
-                        tick = ft
-                    if isinstance(fp, dict) and fp:
-                        prem = fp
+                    dbg["rejected_no_quote"] += 1
+                    return None
 
                 bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
                 ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
@@ -472,11 +466,7 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                     dbg["rejected_no_quote"] += 1
                     return None
 
-                if used_fallback:
-                    dbg["from_fallback"] += 1
-                else:
-                    dbg["from_bulk"] += 1
-
+                dbg["from_bulk"] += 1
                 return norm_sym, MarketRow(
                     exchange="BingX",
                     bid=bid,
@@ -496,13 +486,12 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
             except Exception:
                 return None
 
-        res = await asyncio.gather(*[one(s) for s in selected], return_exceptions=True)
-        for item in res:
+        for item in (one(s) for s in selected):
             if isinstance(item, tuple):
                 out[item[0]] = item[1]
         print(
             f"[BingX] selected={dbg['selected']} ok={len(out)} "
-            f"bulk={dbg['from_bulk']} fallback={dbg['from_fallback']} rejected={dbg['rejected_no_quote']}"
+            f"bulk={dbg['from_bulk']} rejected={dbg['rejected_no_quote']}"
         )
         return out
     except Exception as e:
@@ -549,6 +538,8 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "funding_spread": fund_spread,
                 "funding_eta_buy": funding_eta_str(buy.next_funding_ts, fallback_hours=buy.funding_interval_h),
                 "funding_eta_sell": funding_eta_str(sell.next_funding_ts, fallback_hours=sell.funding_interval_h),
+                "next_funding_ts_buy": buy.next_funding_ts if math.isfinite(buy.next_funding_ts) else None,
+                "next_funding_ts_sell": sell.next_funding_ts if math.isfinite(sell.next_funding_ts) else None,
                 "buy_funding_interval": f"{buy.funding_interval_h}h",
                 "sell_funding_interval": f"{sell.funding_interval_h}h",
                 "buy_vol": buy.vol24_usd,
@@ -715,8 +706,13 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _HTTP_SESSION
+    connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, enable_cleanup_closed=True)
+    _HTTP_SESSION = aiohttp.ClientSession(connector=connector)
     asyncio.create_task(updater_loop())
     yield
+    if _HTTP_SESSION and not _HTTP_SESSION.closed:
+        await _HTTP_SESSION.close()
 
 
 ensure_assets()
@@ -741,7 +737,7 @@ body.theme-binance{--bg:#0f131c;--panel:#1a1f2a;--line:#333a46;--text:#f7f8fb;--
 body.theme-tradingview{--bg:#111827;--panel:#1f2937;--line:#374151;--text:#f9fafb;--muted:#9ca3af;--chip:#253244;--good:#22c55e;--bad:#ef4444;--link:#f9fafb}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;font-size:15px}
 .wrap{max-width:1600px;margin:0 auto;padding:12px}.filter-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px;margin-bottom:10px}
- .topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px}.brand img{width:48px;height:48px;border-radius:12px;border:1px solid var(--line)}.topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:170px}.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
+ .topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px}.brand img{width:56px;height:56px;border-radius:12px;border:1px solid var(--line)}.topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:170px}.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
 .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:8px 12px;border-radius:10px;font-size:14px;cursor:pointer;transition:all .15s ease}.btn:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}.btn:active{transform:translateY(0)}.btn[disabled]{opacity:.45;cursor:not-allowed}
 .filter-actions{display:flex;gap:8px;align-items:center}.filter-panel{display:none;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.filter-panel.open{display:block}.filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr;gap:10px;align-items:end}.lbl{font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:600}
 input,select{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
@@ -854,6 +850,25 @@ function applyFilters(rows){const q=(document.getElementById('q').value||'').tri
 function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinnedPair(a)?1:0; const pb=isPinnedPair(b)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
 function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'fpos';}
 function spreadClass(v){if(!Number.isFinite(v)) return 'neg'; return v<0?'neg':'pos';}
+function parseFundingInterval(s){const n=parseInt(s||'8'); return Number.isFinite(n)&&n>0?n:8;}
+function fundingCountdown(ts, intervalH){
+  const now=Date.now()/1000;
+  let target=null;
+  if(ts&&Number.isFinite(ts)&&ts>now){target=ts;}
+  else{
+    const h=parseFundingInterval(intervalH);
+    const nowH=new Date().getUTCHours();
+    const nextH=((Math.floor(nowH/h)+1)*h);
+    const d=new Date();
+    d.setUTCMinutes(0,0,0);
+    if(nextH>=24){d.setUTCHours(nextH-24);d.setUTCDate(d.getUTCDate()+1);}
+    else{d.setUTCHours(nextH);}
+    target=d.getTime()/1000;
+  }
+  const sec=Math.max(0,Math.floor(target-now));
+  const hh=Math.floor(sec/3600),mm=Math.floor((sec%3600)/60),ss=sec%60;
+  return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+}
 
 async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){const a=new Audio(`/assets/sounds/${encodeURIComponent(STATE.soundFile)}`); a.volume=0.8; await a.play(); return;} }catch(_e){} try{const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='triangle'; o.frequency.value=920; g.gain.setValueAtTime(0.0001,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14); o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(_e2){} }
 
@@ -889,7 +904,7 @@ rows.forEach(r=>{
     </td>
     ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid))}
     ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`)}
-    ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--')}
+    ${split(fundingCountdown(r.next_funding_ts_buy,r.buy_funding_interval),fundingCountdown(r.next_funding_ts_sell,r.sell_funding_interval))}
     <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
     <td><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
     ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol))}
@@ -956,22 +971,27 @@ boot();
 
 
 async def compute_once() -> Dict[str, Any]:
+    global _PREV_CANDIDATES
     started = time.time()
-    async with aiohttp.ClientSession() as session:
-        enabled = CFG.get("enabled", DEFAULT_EXCH_ENABLED)
-        mexc_task = asyncio.create_task(load_mexc(session)) if enabled.get("MEXC", True) else None
-        bybit_task = asyncio.create_task(load_bybit(session)) if enabled.get("Bybit", True) else None
-        mexc = await mexc_task if mexc_task else {}
-        bybit = await bybit_task if bybit_task else {}
+    session = await _get_http_session()
+    enabled = CFG.get("enabled", DEFAULT_EXCH_ENABLED)
 
-        candidates: Dict[str, float] = {}
-        for source in (mexc, bybit):
-            for symbol, row in source.items():
-                vol = row.vol24_usd if math.isfinite(row.vol24_usd) else 0.0
-                candidates[symbol] = max(candidates.get(symbol, 0.0), vol)
+    # Start all three exchanges concurrently; BingX uses prev-cycle candidates for best symbol selection
+    mexc_task = asyncio.create_task(load_mexc(session)) if enabled.get("MEXC", True) else None
+    bybit_task = asyncio.create_task(load_bybit(session)) if enabled.get("Bybit", True) else None
+    bingx_task = asyncio.create_task(load_bingx(session, _PREV_CANDIDATES)) if enabled.get("BingX", True) else None
 
-        sorted_candidates = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
-        bingx = await load_bingx(session, sorted_candidates) if enabled.get("BingX", True) else {}
+    mexc = (await mexc_task) if mexc_task else {}
+    bybit = (await bybit_task) if bybit_task else {}
+    bingx = (await bingx_task) if bingx_task else {}
+
+    # Update candidates list for the next cycle
+    candidates: Dict[str, float] = {}
+    for source in (mexc, bybit):
+        for symbol, row in source.items():
+            vol = row.vol24_usd if math.isfinite(row.vol24_usd) else 0.0
+            candidates[symbol] = max(candidates.get(symbol, 0.0), vol)
+    _PREV_CANDIDATES = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
 
     rows_out: List[dict] = []
     min_vol = float(CFG.get("min_vol", DEFAULT_MIN_VOL_USD))
