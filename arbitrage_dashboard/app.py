@@ -808,7 +808,48 @@ tr{transition:background .1s} tr:hover{background:rgba(128,136,160,.07)} .pinned
 .small{font-size:12px;color:var(--muted)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace}
 .spread-pill{display:inline-block;padding:4px 11px;border-radius:100px;font-weight:800;font-size:12px;letter-spacing:.02em}.spread-pill.pos{background:var(--good);color:#0a2010;box-shadow:0 2px 12px rgba(0,200,100,.28)}.spread-pill.neg{background:var(--bad);color:#fff;box-shadow:0 2px 8px rgba(220,30,30,.22)}.fpos{color:var(--good);font-weight:600}.fneg{color:var(--bad);font-weight:600}
-@media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.topbar{flex-wrap:wrap}.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
+@media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}
+@media(max-width:760px){.topbar{flex-wrap:wrap}.filter-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
+@media(max-width:639px){
+.wrap{padding:8px}
+.filter-card{padding:10px 12px;border-radius:14px}
+.topbar{flex-direction:column;align-items:stretch;gap:8px;margin-bottom:8px}
+.topbar .lang-box{width:100%}.topbar .lang-box .lbl{display:none}.topbar .lang-box select,.topbar select{min-width:unset;width:100%}
+.brand{font-size:16px}.brand img{width:36px;height:36px;border-radius:10px}
+.filter-head{flex-wrap:wrap;gap:6px}
+.filter-actions{width:100%;gap:6px}.filter-actions .btn{flex:1;text-align:center;padding:10px 6px;font-size:12px}
+.auth-wrap{padding:8px 10px}
+.auth-row{flex-direction:column;align-items:stretch;gap:6px}
+.auth-row .btn{width:100%;text-align:center;padding:10px}.auth-row input{max-width:100%!important;width:100%}
+.meta{gap:5px}.badge{padding:4px 10px;font-size:10px}
+.table-wrap{overflow:visible;border:none;background:transparent;box-shadow:none;border-radius:0;margin:0 -2px}
+table{display:block;min-width:unset;width:100%}
+thead{display:none}
+tbody{display:flex;flex-direction:column;gap:10px}
+tr{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:10px 12px;box-shadow:var(--shadow)}
+tr.empty-row{display:block}
+tr.empty-row td{text-align:center;padding:18px;font-size:14px;color:var(--muted)}
+td{display:flex;flex-direction:column;padding:2px 0;border:none;font-size:12px;gap:1px;min-width:0}
+td::before{content:attr(data-label);font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;line-height:1.5}
+td[data-col=fav]{display:none}
+td[data-col=token]{grid-column:1;font-size:16px;font-weight:800;letter-spacing:-.02em;justify-content:center;padding:0 0 6px}
+td[data-col=spread]{grid-column:2;align-items:flex-end;justify-content:center;padding:0 0 6px}
+td[data-col=pair]{grid-column:1/-1;border-bottom:1px solid var(--line);padding-bottom:7px;margin-bottom:2px}
+td[data-col=price]{grid-column:1}
+td[data-col=vol]{grid-column:2}
+td[data-col=funding]{display:none}
+td[data-col=feta]{display:none}
+td[data-col=fspread]{grid-column:1}
+td[data-col=graf]{grid-column:1/-1;align-items:center;padding-top:8px;border-top:1px solid var(--line);margin-top:4px}
+td[data-col=graf] a{width:100%;text-align:center;padding:9px 8px!important;font-size:13px!important}
+.split-cell{padding:0!important}
+.split-cell .line{min-height:22px;padding:0;font-size:12px}
+.split-cell .line+.line{border-top:1px solid var(--line);margin-top:2px;padding-top:2px}
+.pair-line{gap:5px;min-height:22px;font-size:12px}
+.spread-pill{font-size:13px;padding:5px 13px}
+.chips{gap:6px}.chip{padding:6px 12px;font-size:12px}
+.filter-panel.open{display:block}}
 </style></head><body class="theme-classic"><div class="wrap">
 <div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" alt="MoneyMaker UA logo"/><span>MoneyMaker UA</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
 <div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
@@ -912,12 +953,12 @@ let rows=applyFilters([...(STATE.data.rows||[])]);
 sortRows(rows);
 refreshSortIndicators();
 const tb=document.getElementById('tbody');
-if(!rows.length){tb.innerHTML='<tr><td colspan="10">Ничего не найдено.</td></tr>'; return;}
+if(!rows.length){tb.innerHTML='<tr class="empty-row"><td colspan="10">Ничего не найдено.</td></tr>'; return;}
 const top=rows[0];
 const alertKey=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
 if(alertKey!==LAST_ALERT){LAST_ALERT=alertKey; playAlert();}
 
-const split=(a,b,extra='')=>`<td class='split-cell mono ${extra}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
+const split=(a,b,col='',lbl='')=>`<td class='split-cell mono' data-col='${col}' data-label='${lbl}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
 const existingRows=new Map([...tb.querySelectorAll('tr[data-key]')].map(tr=>[tr.dataset.key,tr]));
 rows.forEach(r=>{
   const rKey=pairKey(r);
@@ -928,19 +969,19 @@ rows.forEach(r=>{
   const lbuy=logoFor(r.buy_ex);
   const lsell=logoFor(r.sell_ex);
   tr.innerHTML=`
-    <td><span class='fav'>${pin?'★':'☆'}</span></td>
-    <td class='token'>${r.symbol.replace('USDT','')}</td>
-    <td class='split-cell'>
+    <td data-col='fav'><span class='fav'>${pin?'★':'☆'}</span></td>
+    <td class='token' data-col='token' data-label=''>${r.symbol.replace('USDT','')}</td>
+    <td class='split-cell' data-col='pair' data-label=''>
       <div class='line pair-line long'>⬆ LONG ${lbuy?`<img class='xlogo' src='${lbuy}'/>`:''} <a href='${r.buy_url}' target='_blank'>${r.buy_ex}</a></div>
       <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
     </td>
-    ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid))}
-    ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`)}
-    ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--')}
-    <td class='mono ${fundingClass(r.funding_spread)}'>${fmtPct(r.funding_spread,3)}</td>
-    <td><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
-    ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol))}
-    <td><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}' target='_blank' rel='noopener'>Grafic</a></td>
+    ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid),'price','Цена')}
+    ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
+    ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--','feta','ETA')}
+    <td class='mono ${fundingClass(r.funding_spread)}' data-col='fspread' data-label='F.Спред'>${fmtPct(r.funding_spread,3)}</td>
+    <td data-col='spread' data-label=''><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
+    ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol),'vol','Объём')}
+    <td data-col='graf' data-label=''><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}' target='_blank' rel='noopener'>Grafic</a></td>
   `;
   tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
   tb.appendChild(tr);
