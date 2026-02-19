@@ -842,7 +842,8 @@ td[data-col=funding]{display:none}
 td[data-col=feta]{display:none}
 td[data-col=fspread]{grid-column:1}
 td[data-col=graf]{grid-column:1/-1;align-items:center;padding-top:8px;border-top:1px solid var(--line);margin-top:4px}
-td[data-col=graf] a{width:100%;text-align:center;padding:9px 8px!important;font-size:13px!important}
+td[data-col=token]::before,td[data-col=spread]::before,td[data-col=pair]::before,td[data-col=graf]::before{display:none}
+td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!important;font-size:13px!important}
 .split-cell{padding:0!important}
 .split-cell .line{min-height:22px;padding:0;font-size:12px}
 .split-cell .line+.line{border-top:1px solid var(--line);margin-top:2px;padding-top:2px}
@@ -933,7 +934,6 @@ function togglePinnedPair(r){const k=pairKey(r); if(STATE.pinned.has(k))STATE.pi
 function refreshSortIndicators(){document.querySelectorAll('th.sortable').forEach(th=>{const key=th.getAttribute('data-sort'); th.querySelector('.arr').textContent=(key===STATE.sortKey)?(STATE.sortDir==='asc'?'▲':'▼'):'↕';});}
 
 function renderExchangeFilters(){const box=document.getElementById('exchangeBox'); box.innerHTML=''; ['MEXC','Bybit','BingX'].forEach(ex=>{const chip=document.createElement('label'); const on=!!STATE.config.enabled?.[ex]; chip.className='chip'+(on?'':' off'); const logo=logoFor(ex); chip.innerHTML=`<input type="checkbox" ${on?'checked':''}/> ${logo?`<img src="${logo}" alt="${ex}"/>`:''} ${ex}`; chip.onclick=async (e)=>{e.preventDefault(); const en={...(STATE.config.enabled||{})}; en[ex]=!en[ex]; STATE.config=await apiPost('/api/config',{enabled:en}); renderExchangeFilters(); await refreshData();}; box.appendChild(chip);});}
-function clearExchangeFilters(){STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
 function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; localStorage.setItem('minVolInput','0'); document.getElementById('minSpread').value='0%'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
 
 function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parsePctInput(document.getElementById('minSpread').value||'0'); return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
@@ -946,10 +946,11 @@ async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){co
 function render(){
 if(!STATE.data)return;
 const srvLimit=(STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit))?STATE.data.access.spread_limit:null;
-if(srvLimit!==null){STATE.data.rows=(STATE.data.rows||[]).filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
 document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
 const dbgEl=document.getElementById('dbg'); const dbg=(STATE.data&&STATE.data.dbg)||{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}; if(STATE.user&&STATE.user.is_admin){dbgEl.style.display='inline-block'; dbgEl.textContent=`DBG mexc=${dbg.mexc} bybit=${dbg.bybit} bingx=${dbg.bingx} kept=${dbg.kept} took=${dbg.took_ms}ms`;} else {dbgEl.style.display='none';}
-let rows=applyFilters([...(STATE.data.rows||[])]);
+let rows=[...(STATE.data.rows||[])];
+if(srvLimit!==null){rows=rows.filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
+rows=applyFilters(rows);
 sortRows(rows);
 refreshSortIndicators();
 const tb=document.getElementById('tbody');
@@ -960,6 +961,7 @@ if(alertKey!==LAST_ALERT){LAST_ALERT=alertKey; playAlert();}
 
 const split=(a,b,col='',lbl='')=>`<td class='split-cell mono' data-col='${col}' data-label='${lbl}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
 const existingRows=new Map([...tb.querySelectorAll('tr[data-key]')].map(tr=>[tr.dataset.key,tr]));
+[...tb.querySelectorAll('tr:not([data-key])')].forEach(tr=>tr.remove());
 rows.forEach(r=>{
   const rKey=pairKey(r);
   const pin=isPinnedPair(r);
