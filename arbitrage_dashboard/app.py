@@ -44,7 +44,7 @@ SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
 AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
 USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
-DEFAULT_REFRESH_SEC = 5
+DEFAULT_REFRESH_SEC = 3
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
@@ -731,7 +731,7 @@ PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 PAIR_HISTORY_MAX = 300
 
 HTML_PAGE = r"""
-<!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Dashboard</title>
+<!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Dashboard</title><link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/>
 <style>
 :root{--bg:#f0f0f2;--panel:#e8e8eb;--line:#d2d3d7;--text:#1f2329;--muted:#5f6772;--chip:#ece5c5;--good:#5ee083;--bad:#ea6f6f;--link:#1f2329}
 body.theme-dark-blue{--bg:#091a31;--panel:#132746;--line:#2b4c7f;--text:#eaf2ff;--muted:#9db6db;--chip:#1d3b64;--good:#5ee083;--bad:#ff8c8c;--link:#eaf2ff}
@@ -741,7 +741,7 @@ body.theme-binance{--bg:#0f131c;--panel:#1a1f2a;--line:#333a46;--text:#f7f8fb;--
 body.theme-tradingview{--bg:#111827;--panel:#1f2937;--line:#374151;--text:#f9fafb;--muted:#9ca3af;--chip:#253244;--good:#22c55e;--bad:#ef4444;--link:#f9fafb}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;font-size:15px}
 .wrap{max-width:1600px;margin:0 auto;padding:12px}.filter-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px;margin-bottom:10px}
-.topbar{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:8px}.topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:170px}.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
+ .topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px}.brand img{width:36px;height:36px;border-radius:10px;border:1px solid var(--line)}.topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:170px}.filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.filter-title{font-size:18px;font-weight:700}
 .btn{border:1px solid var(--line);background:var(--chip);color:var(--text);padding:8px 12px;border-radius:10px;font-size:14px;cursor:pointer;transition:all .15s ease}.btn:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.15)}.btn:active{transform:translateY(0)}.btn[disabled]{opacity:.45;cursor:not-allowed}
 .filter-actions{display:flex;gap:8px;align-items:center}.filter-panel{display:none;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.filter-panel.open{display:block}.filter-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr 1fr;gap:10px;align-items:end}.lbl{font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:600}
 input,select{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
@@ -753,7 +753,7 @@ body.theme-dark-blue select option, body.theme-binance select option, body.theme
 th,td{padding:10px;border-bottom:1px solid var(--line);font-size:14px} th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:13px;font-weight:700}
 th.sortable{cursor:pointer;user-select:none;transition:color .15s ease} th.sortable:hover{color:var(--good)} th.sortable .arr{opacity:.7;margin-left:5px;font-size:11px}
 tr:hover{background:rgba(120,130,150,.1)} .pinned{background:rgba(239,208,70,.16)!important}.fav{font-size:18px;cursor:pointer}
-.token{font-size:28px;font-weight:800;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;min-height:36px}
+.token{font-size:16px;font-weight:700;line-height:1}.pair-line{display:flex;align-items:center;gap:8px;min-height:36px}
 .long{color:var(--good);font-weight:700}.short{color:var(--bad);font-weight:700}.xlogo{width:20px;height:20px;object-fit:contain;border-radius:99px}
 .split-cell{padding:0!important}.split-cell .line{display:flex;align-items:center;min-height:36px;padding:0 10px}.split-cell .line + .line{border-top:1px solid var(--line)}
 .auth-wrap{margin:8px 0 10px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
@@ -765,7 +765,7 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 .spread-pill{display:inline-block;padding:3px 8px;border-radius:8px;font-weight:800}.spread-pill.pos{background:var(--good);color:#0f2817}.spread-pill.neg{background:var(--bad);color:#2f0f0f}.fpos{color:var(--good);font-weight:700}.fneg{color:var(--bad);font-weight:700}
 @media(max-width:1300px){.filter-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:760px){.topbar{justify-content:space-between}.filter-grid{grid-template-columns:1fr 1fr}}@media(max-width:560px){.filter-grid{grid-template-columns:1fr}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="topbar"><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
+<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" alt="MoneyMaker UA Bot logo"/><span>MoneyMaker UA Bot</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
 <div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
 <div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div></div>
@@ -932,7 +932,7 @@ async function boot(){
     STATE.config=await apiGet('/api/config');
   }catch(e){
     console.error('config load failed',e);
-    STATE.config={refresh_sec:5,min_vol:0,min_spread:0,enabled:{MEXC:true,Bybit:true,BingX:true}};
+    STATE.config={refresh_sec:3,min_vol:0,min_spread:0,enabled:{MEXC:true,Bybit:true,BingX:true}};
   }
   try{ await loadMe(); }catch(e){ console.error('loadMe failed',e); STATE.user=null; }
   try{ STATE.data=await apiGet('/api/data'); }catch(e){ console.error('data load failed',e); STATE.data={rows:[],updated_at:'—',dbg:{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}}; }
@@ -948,7 +948,7 @@ async function boot(){
   if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} 
   renderExchangeFilters(); render();
 
-  setInterval(refreshData,Math.max(1000,(STATE.config.refresh_sec||5)*1000));
+  setInterval(refreshData,3000);
 }
 boot();
 </script></body></html>
@@ -1032,7 +1032,7 @@ async def updater_loop():
                 CACHE.update(data)
         except Exception:
             pass
-        await asyncio.sleep(max(1, int(CFG.get("refresh_sec", DEFAULT_REFRESH_SEC))))
+        await asyncio.sleep(3)
 
 
 @app.get("/", response_class=HTMLResponse)
