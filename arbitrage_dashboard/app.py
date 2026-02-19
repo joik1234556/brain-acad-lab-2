@@ -652,6 +652,28 @@ def _decrypt_client_field(value: str) -> str:
     return plain.decode("utf-8")
 
 
+def _extract_auth_credentials(payload: Dict[str, Any]) -> Tuple[str, str]:
+    plain_username = _normalize_username(str(payload.get("username") or ""))
+    plain_password = str(payload.get("password") or "")
+
+    dec_username = ""
+    dec_password = ""
+
+    enc_u = str(payload.get("username_enc") or "")
+    enc_p = str(payload.get("password_enc") or "")
+    if enc_u and enc_p:
+        try:
+            dec_username = _normalize_username(_decrypt_client_field(enc_u))
+            dec_password = _decrypt_client_field(enc_p)
+        except Exception:
+            dec_username = ""
+            dec_password = ""
+
+    username = dec_username or plain_username
+    password = dec_password or plain_password
+    return username, password
+
+
 USERS = _load_users()
 USERS_LOCK = asyncio.Lock()
 SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -779,8 +801,8 @@ async function encryptWithPub(plain){
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
 function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('btnAuthSubmit').textContent=mode==='register'?'Зарегистрироваться':'Войти';}
 function closeAuthForm(){document.getElementById('authForm').style.display='none';}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText('Ошибка входа: '+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText('Ошибка входа: '+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
 async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
@@ -1135,14 +1157,7 @@ async def api_auth_pubkey():
 
 @app.post("/api/auth/register")
 async def api_auth_register(payload: Dict[str, Any]):
-    username = ""
-    password = ""
-    try:
-        username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
-        password = _decrypt_client_field(str(payload.get("password_enc") or ""))
-    except Exception:
-        username = _normalize_username(str(payload.get("username") or ""))
-        password = str(payload.get("password") or "")
+    username, password = _extract_auth_credentials(payload)
 
     if len(username) < 3 or len(password) < 6:
         return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=400)
@@ -1165,14 +1180,7 @@ async def api_auth_register(payload: Dict[str, Any]):
 
 @app.post("/api/auth/login")
 async def api_auth_login(payload: Dict[str, Any]):
-    username = ""
-    password = ""
-    try:
-        username = _normalize_username(_decrypt_client_field(str(payload.get("username_enc") or "")))
-        password = _decrypt_client_field(str(payload.get("password_enc") or ""))
-    except Exception:
-        username = _normalize_username(str(payload.get("username") or ""))
-        password = str(payload.get("password") or "")
+    username, password = _extract_auth_credentials(payload)
 
     user = USERS.get(username)
     if not user or not _verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
