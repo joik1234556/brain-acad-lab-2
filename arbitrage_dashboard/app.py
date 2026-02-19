@@ -346,7 +346,7 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     return out
 
 
-async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) -> Dict[str, MarketRow]:
+async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], on_symbol=None) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
         dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
@@ -477,7 +477,7 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                 else:
                     dbg["from_bulk"] += 1
 
-                return norm_sym, MarketRow(
+                market_row = MarketRow(
                     exchange="BingX",
                     bid=bid,
                     ask=ask,
@@ -493,6 +493,12 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str]) 
                         default=8,
                     ),
                 )
+                if on_symbol is not None:
+                    try:
+                        await on_symbol(norm_sym, market_row)
+                    except Exception:
+                        pass
+                return norm_sym, market_row
             except Exception:
                 return None
 
@@ -557,6 +563,30 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "sell_url": sell.url,
             })
     return out
+
+
+def _push_pairs_to_live_rows(
+    mexc: Dict[str, "MarketRow"],
+    bybit: Dict[str, "MarketRow"],
+    bingx: Dict[str, "MarketRow"],
+    min_vol: float,
+    min_spread: float,
+    symbols: Optional[set] = None,
+) -> None:
+    if symbols is None:
+        symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
+    for symbol in symbols:
+        market_rows = [r for r in (mexc.get(symbol), bybit.get(symbol), bingx.get(symbol)) if r is not None]
+        if len(market_rows) < 2:
+            continue
+        pairs = best_pairs(market_rows, min_vol=min_vol)
+        for pair in pairs:
+            if min_spread > 0 and pair["spread"] < min_spread:
+                continue
+            pair["symbol"] = symbol
+            key = f"{symbol}|{pair['buy_ex']}|{pair['sell_ex']}"
+            pair["pair_key"] = key
+            LIVE_ROWS[key] = pair
 
 
 def load_config() -> Dict[str, Any]:
@@ -729,6 +759,7 @@ CACHE = {"updated_at": None, "rows": [], "dbg": {"mexc": 0, "bybit": 0, "bingx":
 CACHE_LOCK = asyncio.Lock()
 PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 PAIR_HISTORY_MAX = 300
+LIVE_ROWS: Dict[str, dict] = {}
 
 HTML_PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Dashboard</title><link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/>
@@ -867,17 +898,19 @@ let rows=applyFilters([...(STATE.data.rows||[])]);
 sortRows(rows);
 refreshSortIndicators();
 const tb=document.getElementById('tbody');
-tb.innerHTML='';
 if(!rows.length){tb.innerHTML='<tr><td colspan="10">Ничего не найдено.</td></tr>'; return;}
 const top=rows[0];
-const key=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
-if(key!==LAST_ALERT){LAST_ALERT=key; playAlert();}
+const alertKey=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
+if(alertKey!==LAST_ALERT){LAST_ALERT=alertKey; playAlert();}
 
 const split=(a,b,extra='')=>`<td class='split-cell mono ${extra}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
+const existingRows=new Map([...tb.querySelectorAll('tr[data-key]')].map(tr=>[tr.dataset.key,tr]));
 rows.forEach(r=>{
+  const rKey=pairKey(r);
   const pin=isPinnedPair(r);
-  const tr=document.createElement('tr');
-  if(pin)tr.classList.add('pinned');
+  let tr=existingRows.get(rKey);
+  if(!tr){tr=document.createElement('tr'); tr.dataset.key=rKey;}
+  tr.className=pin?'pinned':'';
   const lbuy=logoFor(r.buy_ex);
   const lsell=logoFor(r.sell_ex);
   tr.innerHTML=`
@@ -897,7 +930,9 @@ rows.forEach(r=>{
   `;
   tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
   tb.appendChild(tr);
+  existingRows.delete(rKey);
 });
+existingRows.forEach(tr=>tr.remove());
 }
 
 async function refreshData(){
@@ -964,6 +999,12 @@ async def compute_once() -> Dict[str, Any]:
         mexc = await mexc_task if mexc_task else {}
         bybit = await bybit_task if bybit_task else {}
 
+        min_vol = float(CFG.get("min_vol", DEFAULT_MIN_VOL_USD))
+        min_spread = float(CFG.get("min_spread", DEFAULT_MIN_SPREAD))
+
+        # Phase 1: immediately push MEXC+Bybit pairs so clients see updates fast
+        _push_pairs_to_live_rows(mexc, bybit, {}, min_vol, min_spread)
+
         candidates: Dict[str, float] = {}
         for source in (mexc, bybit):
             for symbol, row in source.items():
@@ -971,11 +1012,14 @@ async def compute_once() -> Dict[str, Any]:
                 candidates[symbol] = max(candidates.get(symbol, 0.0), vol)
 
         sorted_candidates = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
-        bingx = await load_bingx(session, sorted_candidates) if enabled.get("BingX", True) else {}
+
+        # Phase 2: BingX – update LIVE_ROWS per coin as each symbol's data arrives
+        async def on_bingx_symbol(norm_sym: str, bingx_row: MarketRow) -> None:
+            _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
+
+        bingx = await load_bingx(session, sorted_candidates, on_symbol=on_bingx_symbol) if enabled.get("BingX", True) else {}
 
     rows_out: List[dict] = []
-    min_vol = float(CFG.get("min_vol", DEFAULT_MIN_VOL_USD))
-    min_spread = float(CFG.get("min_spread", DEFAULT_MIN_SPREAD))
     all_symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
 
     for symbol in all_symbols:
@@ -1010,6 +1054,13 @@ async def compute_once() -> Dict[str, Any]:
         })
         if len(h) > PAIR_HISTORY_MAX:
             del h[:-PAIR_HISTORY_MAX]
+
+    # Sync LIVE_ROWS: apply final authoritative data and remove stale pairs
+    final_valid_keys = {r["pair_key"] for r in rows_out}
+    for k in [k for k in list(LIVE_ROWS) if k not in final_valid_keys]:
+        LIVE_ROWS.pop(k, None)
+    for r in rows_out:
+        LIVE_ROWS[r["pair_key"]] = r
 
     return {
         "started_ts": started,
@@ -1087,16 +1138,22 @@ async def api_assets():
 @app.get("/api/data")
 async def api_data(request: Request):
     user = _session_user(request)
-    async with CACHE_LOCK:
-        data = dict(CACHE)
-        rows = list(CACHE.get("rows", []))
+    # Serve from LIVE_ROWS for real-time per-coin incremental updates
+    rows = sorted(LIVE_ROWS.values(), key=lambda r: float(r.get("spread") or 0.0), reverse=True)
     rows, spread_limit, is_admin, is_paid = _limit_rows_for_access(rows, user)
-    data["rows"] = rows
-    data["access"] = {
-        "username": user.get("username") if user else None,
-        "is_admin": is_admin,
-        "subscription_approved": is_paid,
-        "spread_limit": spread_limit,
+    async with CACHE_LOCK:
+        updated_at = CACHE.get("updated_at") or time.strftime("%H:%M:%S")
+        dbg = dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
+    data = {
+        "updated_at": updated_at,
+        "dbg": {**dbg, "kept": len(rows)},
+        "rows": rows,
+        "access": {
+            "username": user.get("username") if user else None,
+            "is_admin": is_admin,
+            "subscription_approved": is_paid,
+            "spread_limit": spread_limit,
+        },
     }
     return JSONResponse(data)
 
@@ -1104,8 +1161,7 @@ async def api_data(request: Request):
 @app.get("/api/pair")
 async def api_pair(request: Request, pair_key: str):
     user = _session_user(request)
-    rows = list(CACHE.get("rows", []))
-    row = next((x for x in rows if x.get("pair_key") == pair_key), None)
+    row = LIVE_ROWS.get(pair_key)
     if not row:
         return JSONResponse({"ok": False, "error": "pair_not_found"}, status_code=404)
     filtered_rows, spread_limit, _is_admin, _is_paid = _limit_rows_for_access([row], user)
