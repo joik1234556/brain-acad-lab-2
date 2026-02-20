@@ -997,8 +997,11 @@ body.theme-tradingview{background-image:radial-gradient(ellipse 60% 30% at 10% 9
 .wrap{max-width:1640px;margin:0 auto;padding:14px}
 .filter-card{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:16px;margin-bottom:12px;box-shadow:var(--shadow)}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
-.brand{display:flex;align-items:center;gap:11px;font-weight:900;font-size:19px;color:var(--accent);background:linear-gradient(130deg,var(--accent),var(--good));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.brand img{width:44px;height:44px;border-radius:13px;border:1.5px solid var(--line);box-shadow:var(--shadow)}
+.brand{display:flex;align-items:center;gap:11px;font-weight:900;font-size:19px}
+.brand span{background:linear-gradient(130deg,var(--accent),var(--good));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;color:var(--accent);letter-spacing:-.4px}
+.brand img{width:44px;height:44px;border-radius:13px;border:1.5px solid var(--line);box-shadow:var(--shadow);object-fit:contain;filter:drop-shadow(0 2px 8px var(--glow))}
+.topbar-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.auth-inline{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .topbar .lang-box{display:flex;align-items:center;gap:8px}.topbar select{min-width:160px}
 .filter-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}.filter-title{font-size:16px;font-weight:700}
 .btn{border:1.5px solid var(--line);background:var(--chip);color:var(--text);padding:8px 15px;border-radius:12px;font-size:13px;font-weight:600;cursor:pointer;transition:all .17s cubic-bezier(.4,0,.2,1);letter-spacing:.01em}
@@ -1020,7 +1023,7 @@ tr{transition:background .1s} tr:hover{background:rgba(128,136,160,.07)} .pinned
 .token{font-size:15px;font-weight:800;letter-spacing:-.02em}.pair-line{display:flex;align-items:center;gap:7px;min-height:34px}
 .long{color:var(--good);font-weight:700;font-size:11px;letter-spacing:.03em}.short{color:var(--bad);font-weight:700;font-size:11px;letter-spacing:.03em}.xlogo{width:18px;height:18px;object-fit:contain;border-radius:50%}
 .split-cell{padding:0!important}.split-cell .line{display:flex;align-items:center;min-height:34px;padding:0 12px}.split-cell .line + .line{border-top:1px solid var(--line)}
-.auth-wrap{margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:16px;background:var(--bg)}
+.auth-wrap{margin:8px 0 0;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--bg)}
 .auth-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .auth-row input{max-width:200px}
 #authForm{display:none}
@@ -1034,7 +1037,9 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 .wrap{padding:8px}
 .filter-card{padding:10px 12px;border-radius:14px}
 .topbar{flex-direction:column;align-items:stretch;gap:8px;margin-bottom:8px}
+.topbar-right{width:100%;flex-direction:column;align-items:stretch;gap:6px}
 .topbar .lang-box{width:100%}.topbar .lang-box .lbl{display:none}.topbar .lang-box select,.topbar select{min-width:unset;width:100%}
+.auth-inline{flex-wrap:wrap;gap:6px}.auth-inline .btn{flex:1;text-align:center;padding:10px 6px;font-size:12px}
 .brand{font-size:16px}.brand img{width:36px;height:36px;border-radius:10px}
 .filter-head{flex-wrap:wrap;gap:6px}
 .filter-actions{width:100%;gap:6px}.filter-actions .btn{flex:1;text-align:center;padding:10px 6px;font-size:12px}
@@ -1071,10 +1076,10 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 .chips{gap:6px}.chip{padding:6px 12px;font-size:12px}
 .filter-panel.open{display:block}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.png" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
-<div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
+<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.png" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div></div>
+<div id="authContainer" class="auth-wrap" style="display:none"><div id="authForm" class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
-<div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> <span id="lblSoundCheck">звук</span></label><select id="soundSel"></select></div></div></div>
+<div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/></label><select id="soundSel"></select></div></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="refreshBtn">↻ Refresh</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" id="thPrice" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th id="thFundingCalc">Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
@@ -1109,8 +1114,8 @@ async function encryptWithPub(plain){
   return b64(enc);
 }
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
-function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
-function closeAuthForm(){document.getElementById('authForm').style.display='none';}
+function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
+function closeAuthForm(){document.getElementById('authForm').style.display='none'; if(document.getElementById('adminBox').style.display!=='block') document.getElementById('authContainer').style.display='none';}
 async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
 async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
 async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
@@ -1119,6 +1124,7 @@ function renderAuth(){
   const u=STATE.user;
   const t=I18N[STATE.lang]||I18N.ru;
   const adminBox=document.getElementById('adminBox');
+  const authContainer=document.getElementById('authContainer');
   const bLogin=document.getElementById('btnLogin');
   const bReg=document.getElementById('btnRegister');
   const bOut=document.getElementById('btnLogout');
@@ -1126,6 +1132,8 @@ function renderAuth(){
   if(!u){
     setAuthStateText(`${t.guestAccess} ${lim||t.guestLimit}`);
     adminBox.style.display='none';
+    // Hide authContainer only if form is also closed
+    if(document.getElementById('authForm').style.display!=='flex') authContainer.style.display='none';
     bLogin.style.display='inline-block';
     bReg.style.display='inline-block';
     bOut.style.display='none';
@@ -1134,6 +1142,8 @@ function renderAuth(){
   const status=u.is_admin?t.adminRole:t.userRole;
   setAuthStateText(`${t.userPrefix} ${u.username} • ${status}`);
   adminBox.style.display=u.is_admin?'block':'none';
+  if(u.is_admin) authContainer.style.display='block';
+  else if(document.getElementById('authForm').style.display!=='flex') authContainer.style.display='none';
   bLogin.style.display='none';
   bReg.style.display='none';
   bOut.style.display='inline-block';
@@ -1151,7 +1161,7 @@ function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase()
 
 function logoFor(ex){return STATE.assets.logos?.[ex]||FALLBACK_LOGO[ex]||'';}
 function applyTheme(){document.body.className=STATE.theme; document.getElementById('themeSel').value=STATE.theme; localStorage.setItem('theme',STATE.theme);}
-function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('thPrice').childNodes[0].textContent=t.price; document.getElementById('btnRegister').textContent=t.register; document.getElementById('btnLogin').textContent=t.login; document.getElementById('btnLogout').textContent=t.logout; document.getElementById('btnAuthCancel').textContent=t.cancelBtn; document.getElementById('btnLoadUsers').textContent=t.loadUsers; document.getElementById('lblSoundCheck').textContent=t.soundCheck; const fp=document.getElementById('filterPanel'); const ftBtn=document.getElementById('filterToggleBtn'); ftBtn.textContent=fp.classList.contains('open')?t.hideFilter:t.showFilter; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang); renderAuth();}
+function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('thPrice').childNodes[0].textContent=t.price; document.getElementById('btnRegister').textContent=t.register; document.getElementById('btnLogin').textContent=t.login; document.getElementById('btnLogout').textContent=t.logout; document.getElementById('btnAuthCancel').textContent=t.cancelBtn; document.getElementById('btnLoadUsers').textContent=t.loadUsers; const fp=document.getElementById('filterPanel'); const ftBtn=document.getElementById('filterToggleBtn'); ftBtn.textContent=fp.classList.contains('open')?t.hideFilter:t.showFilter; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang); renderAuth();}
 function setCooldown(sec){cooldown=sec; const btn=document.getElementById('refreshBtn'); if(timerId)clearInterval(timerId); timerId=setInterval(()=>{cooldown=Math.max(0,cooldown-1); btn.disabled=cooldown>0; btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh'; document.getElementById('cooldownBadge').textContent=`Manual refresh cooldown: ${cooldown}s`; if(cooldown===0){clearInterval(timerId);timerId=null;}},1000); btn.disabled=true; btn.textContent=`↻ Refresh (${cooldown})`;}
 function pairKey(r){return `${r.symbol}|${r.buy_ex}|${r.sell_ex}`;}
 function isPinnedPair(r){return STATE.pinned.has(pairKey(r));}
