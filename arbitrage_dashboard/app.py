@@ -584,6 +584,8 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "funding_spread": fund_spread,
                 "funding_eta_buy": funding_eta_str(buy.next_funding_ts, fallback_hours=buy.funding_interval_h),
                 "funding_eta_sell": funding_eta_str(sell.next_funding_ts, fallback_hours=sell.funding_interval_h),
+                "buy_next_ts_ms": int(buy.next_funding_ts * 1000) if math.isfinite(buy.next_funding_ts) else 0,
+                "sell_next_ts_ms": int(sell.next_funding_ts * 1000) if math.isfinite(sell.next_funding_ts) else 0,
                 "buy_funding_interval": f"{buy.funding_interval_h}h",
                 "sell_funding_interval": f"{sell.funding_interval_h}h",
                 "buy_vol": buy.vol24_usd,
@@ -1089,6 +1091,63 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
+// ── TimerHub: live per-exchange funding countdowns ──────────────────────────
+const EMPTY_TIMER='--:--:--';
+const FUNDING_REFRESH_MS=60000;
+const TimerHub=(function(){
+  const subscribers=new Map();
+  function formatTime(sec){
+    sec=Math.max(0,Math.floor(sec));
+    const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+    return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  }
+  function subscribe(elementId,endTimeMs,exchange,onFinish=null){
+    const el=document.getElementById(elementId);
+    if(!el){return;}
+    const endTimeUtc=Number(endTimeMs);
+    if(isNaN(endTimeUtc)||endTimeUtc<=0){el.textContent=EMPTY_TIMER; return;}
+    const sec=Math.max(0,Math.floor((endTimeUtc-Date.now())/1000));
+    el.textContent=formatTime(sec);
+    subscribers.set(elementId,{el,endTimeUtc,exchange,onFinish,finished:sec===0});
+    console.debug(`[TimerHub] subscribe id=${elementId} exchange=${exchange} end=${new Date(endTimeUtc).toISOString()} remaining=${sec}s`);
+  }
+  function update(exchange,newEndTimeMs){
+    const now=Date.now();
+    for(const[id,sub] of subscribers){
+      if(sub.exchange!==exchange)continue;
+      sub.endTimeUtc=Number(newEndTimeMs);
+      sub.finished=false;
+      const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
+      if(sub.el.isConnected)sub.el.textContent=formatTime(remaining);
+    }
+    console.debug(`[TimerHub] update exchange=${exchange} newEnd=${new Date(newEndTimeMs).toISOString()}`);
+  }
+  function tick(){
+    const now=Date.now();
+    for(const[id,sub] of subscribers){
+      if(!sub.el.isConnected){subscribers.delete(id);continue;}
+      const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
+      sub.el.textContent=formatTime(remaining);
+      if(remaining===0&&!sub.finished){sub.finished=true;if(sub.onFinish)sub.onFinish(sub.exchange,id);}
+    }
+  }
+  setInterval(tick,1000);
+  return{subscribe,update,formatTime};
+})();
+
+async function refreshFundingTime(exchange){
+  try{
+    const resp=await fetch(`/api/funding-next?exchange=${encodeURIComponent(exchange)}`);
+    const data=await resp.json();
+    const ms=Number(data.nextFundingTime||0);
+    if(ms>Date.now())TimerHub.update(exchange,ms);
+  }catch(err){console.error(`[TimerHub] refreshFundingTime failed for ${exchange}:`,err);}
+}
+function startFundingRefresh(exchanges){
+  exchanges.forEach(ex=>refreshFundingTime(ex));
+  setInterval(()=>exchanges.forEach(ex=>refreshFundingTime(ex)),FUNDING_REFRESH_MS);
+}
+// ────────────────────────────────────────────────────────────────────────────
 let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
 const I18N={
   ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку'},
@@ -1215,13 +1274,16 @@ rows.forEach(r=>{
     </td>
     ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid),'price','Цена')}
     ${split(`${fmtPct(r.buy_funding,3)} → ${fmtPct(r.buy_funding_adjusted??r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} → ${fmtPct(r.sell_funding_adjusted??r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
-    ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--','feta','ETA')}
+    <td class='split-cell mono' data-col='feta' data-label='ETA'><div class='line'><span id='timer-${rKey}-buy'>--:--:--</span></div><div class='line'><span id='timer-${rKey}-sell'>--:--:--</span></div></td>
     <td class='mono ${fundingClass(r.funding_spread)}' data-col='fspread' data-label='F.Спред'>${fmtPct(r.funding_spread,3)}</td>
     <td data-col='spread' data-label=''><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
     ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol),'vol','Объём')}
     <td data-col='graf' data-label=''><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}' target='_blank' rel='noopener'>Grafic</a></td>
   `;
   tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
+  // Subscribe live countdowns AFTER innerHTML so spans exist in DOM
+  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex);
+  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex);
   tb.appendChild(tr);
   existingRows.delete(rKey);
 });
@@ -1275,6 +1337,7 @@ async function boot(){
   (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);});
   if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} 
   renderExchangeFilters(); render();
+  startFundingRefresh(['MEXC','Bybit','BingX']);
 
   let _sseActive=false;
   function connectSSE(){
@@ -1448,6 +1511,29 @@ async def api_config_set(payload: Dict[str, Any]):
 async def api_assets():
     logos = {ex: find_logo(ex) for ex in ("MEXC", "Bybit", "BingX")}
     return JSONResponse({"logos": logos, "sounds": list_sounds()})
+
+
+@app.get("/api/funding-next")
+async def api_funding_next(exchange: str = ""):
+    """Return the nearest next-funding timestamp (ms UTC) for the given exchange.
+    Retrieves live data via _rlive_all() and returns the minimum future
+    buy_next_ts_ms or sell_next_ts_ms for rows belonging to that exchange
+    (case-insensitive match).
+    """
+    live = await _rlive_all()
+    ex = exchange.strip().lower()
+    nearest_funding_ms: int = 0
+    now_ms = int(time.time() * 1000)
+    for row in live.values():
+        if row.get("buy_ex", "").lower() == ex:
+            ts = int(row.get("buy_next_ts_ms") or 0)
+            if ts > now_ms and (nearest_funding_ms == 0 or ts < nearest_funding_ms):
+                nearest_funding_ms = ts
+        if row.get("sell_ex", "").lower() == ex:
+            ts = int(row.get("sell_next_ts_ms") or 0)
+            if ts > now_ms and (nearest_funding_ms == 0 or ts < nearest_funding_ms):
+                nearest_funding_ms = ts
+    return JSONResponse({"nextFundingTime": nearest_funding_ms, "exchange": exchange})
 
 
 @app.get("/api/data")
