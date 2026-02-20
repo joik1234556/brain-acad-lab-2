@@ -22,6 +22,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
+try:
+    import redis.asyncio as aioredis  # type: ignore[import]
+    _REDIS_AVAILABLE = True
+except ImportError:
+    aioredis = None  # type: ignore[assignment]
+    _REDIS_AVAILABLE = False
+
 if getattr(sys, "frozen", False):
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w")
@@ -586,7 +593,7 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
     return out
 
 
-def _push_pairs_to_live_rows(
+async def _push_pairs_to_live_rows(
     mexc: Dict[str, "MarketRow"],
     bybit: Dict[str, "MarketRow"],
     bingx: Dict[str, "MarketRow"],
@@ -607,7 +614,7 @@ def _push_pairs_to_live_rows(
             pair["symbol"] = symbol
             key = f"{symbol}|{pair['buy_ex']}|{pair['sell_ex']}"
             pair["pair_key"] = key
-            LIVE_ROWS[key] = pair
+            await _rlive_set(key, pair)
 
 
 def load_config() -> Dict[str, Any]:
@@ -766,8 +773,12 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await _redis_connect()
     asyncio.create_task(updater_loop())
+    if _REDIS is not None:
+        asyncio.create_task(_redis_sse_subscriber())
     yield
+    await _redis_disconnect()
 
 
 ensure_assets()
@@ -783,14 +794,191 @@ PAIR_HISTORY_MAX = 300
 LIVE_ROWS: Dict[str, dict] = {}
 _SSE_QUEUES: List[asyncio.Queue] = []
 
+# ---------------------------------------------------------------------------
+# Optional Redis layer
+# Set REDIS_URL env var (e.g. redis://localhost:6379/0) to enable Redis.
+# When Redis is available:
+#   - LIVE_ROWS are stored in Redis Hash "arb:live"  → survives restarts,
+#     shared across multiple uvicorn workers.
+#   - PAIR_HISTORY entries stored in Redis Lists "arb:hist:{pair_key}".
+#   - CACHE metadata stored as "arb:cache_meta".
+#   - SSE broadcast published on "arb:sse" pub/sub channel so all workers
+#     can push to their own connected clients.
+# When Redis is NOT available: falls back to in-process dicts (current
+# behaviour, unchanged).
+# ---------------------------------------------------------------------------
+
+_REDIS_KEY_LIVE = "arb:live"
+_REDIS_KEY_CACHE_META = "arb:cache_meta"
+_REDIS_CHANNEL_SSE = "arb:sse"
+_REDIS: Optional[Any] = None  # redis.asyncio.Redis instance, or None
+
+
+async def _redis_connect() -> None:
+    global _REDIS
+    url = os.environ.get("REDIS_URL", "").strip()
+    if not url or not _REDIS_AVAILABLE:
+        return
+    try:
+        client = aioredis.from_url(url, encoding="utf-8", decode_responses=True)
+        await client.ping()
+        _REDIS = client
+        print(f"[Redis] Connected: {url}")
+    except Exception as exc:
+        print(f"[Redis] Cannot connect to {url!r}: {exc} — using in-memory fallback")
+        _REDIS = None
+
+
+async def _redis_disconnect() -> None:
+    global _REDIS
+    if _REDIS is not None:
+        try:
+            await _REDIS.aclose()
+        except Exception:
+            pass
+        _REDIS = None
+
+
+# LIVE_ROWS helpers -----------------------------------------------------------
+
+async def _rlive_set(pair_key: str, row: dict) -> None:
+    """Write one row to Redis hash (or in-memory dict)."""
+    LIVE_ROWS[pair_key] = row
+    if _REDIS is not None:
+        try:
+            await _REDIS.hset(_REDIS_KEY_LIVE, pair_key, json.dumps(row))
+        except Exception:
+            pass
+
+
+async def _rlive_del(pair_key: str) -> None:
+    """Delete one row from Redis hash and in-memory dict."""
+    LIVE_ROWS.pop(pair_key, None)
+    if _REDIS is not None:
+        try:
+            await _REDIS.hdel(_REDIS_KEY_LIVE, pair_key)
+        except Exception:
+            pass
+
+
+async def _rlive_all() -> Dict[str, dict]:
+    """Return all live rows from Redis (or in-memory fallback)."""
+    if _REDIS is not None:
+        try:
+            raw = await _REDIS.hgetall(_REDIS_KEY_LIVE)
+            if raw:
+                return {k: json.loads(v) for k, v in raw.items()}
+        except Exception:
+            pass
+    return dict(LIVE_ROWS)
+
+
+# PAIR_HISTORY helpers --------------------------------------------------------
+
+async def _rhist_append(pair_key: str, entry: dict) -> None:
+    """Append a history entry; also update in-memory PAIR_HISTORY."""
+    h = PAIR_HISTORY.setdefault(pair_key, [])
+    h.append(entry)
+    if len(h) > PAIR_HISTORY_MAX:
+        del h[:-PAIR_HISTORY_MAX]
+    if _REDIS is not None:
+        rkey = f"arb:hist:{pair_key}"
+        try:
+            pipe = _REDIS.pipeline()
+            pipe.rpush(rkey, json.dumps(entry))
+            pipe.ltrim(rkey, -PAIR_HISTORY_MAX, -1)
+            await pipe.execute()
+        except Exception:
+            pass
+
+
+async def _rhist_get(pair_key: str) -> List[dict]:
+    """Fetch history from Redis if available, else in-memory."""
+    if _REDIS is not None:
+        rkey = f"arb:hist:{pair_key}"
+        try:
+            raw = await _REDIS.lrange(rkey, 0, -1)
+            if raw:
+                return [json.loads(x) for x in raw]
+        except Exception:
+            pass
+    return list(PAIR_HISTORY.get(pair_key, []))
+
+
+# CACHE metadata helpers -------------------------------------------------------
+
+async def _rcache_set(meta: dict) -> None:
+    if _REDIS is not None:
+        try:
+            await _REDIS.set(_REDIS_KEY_CACHE_META, json.dumps(meta))
+        except Exception:
+            pass
+
+
+async def _rcache_get() -> dict:
+    if _REDIS is not None:
+        try:
+            raw = await _REDIS.get(_REDIS_KEY_CACHE_META)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+    return {}
+
+
+# SSE broadcast (Redis pub/sub for multi-worker) ------------------------------
+
+async def _redis_sse_subscriber() -> None:
+    """Subscribe to the Redis pub/sub SSE channel and forward messages
+    to all in-process SSE clients.  Runs as a background task when Redis
+    is available.  If the connection drops it retries after 5 seconds."""
+    if _REDIS is None:
+        return
+    url = os.environ.get("REDIS_URL", "").strip()
+    if not url:
+        return
+    while True:
+        try:
+            sub_client = aioredis.from_url(url, encoding="utf-8", decode_responses=True)
+            pubsub = sub_client.pubsub()
+            await pubsub.subscribe(_REDIS_CHANNEL_SSE)
+            async for message in pubsub.listen():
+                if message and message.get("type") == "message":
+                    data = message.get("data", "")
+                    # Forward to in-process queues (clients on THIS worker)
+                    for q in list(_SSE_QUEUES):
+                        try:
+                            q.put_nowait(data)
+                        except asyncio.QueueFull:
+                            pass
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"[Redis] SSE subscriber error: {exc} — retrying in 5s")
+            await asyncio.sleep(5)
+
 
 def _broadcast_sse(payload: str) -> None:
-    """Push a message to every connected SSE client (fire-and-forget)."""
+    """Push a message to every connected SSE client (fire-and-forget).
+
+    When Redis is configured the message is also published to the
+    ``arb:sse`` pub/sub channel so workers that have no local SSE
+    subscriber still deliver the update to their clients via
+    ``_redis_sse_subscriber``.
+    """
     for q in list(_SSE_QUEUES):
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
             pass  # slow client – skip this tick
+    if _REDIS is not None:
+        # Schedule publish on the running event loop without blocking the caller.
+        try:
+            asyncio.get_running_loop().create_task(
+                _REDIS.publish(_REDIS_CHANNEL_SSE, payload)
+            )
+        except RuntimeError:
+            pass  # no running loop (shouldn't happen in normal async context)
 
 HTML_PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Insights</title><link rel="icon" type="image/png" href="/static/mmua-logo.png"/>
@@ -1106,7 +1294,7 @@ async def compute_once() -> Dict[str, Any]:
         min_spread = float(CFG.get("min_spread", DEFAULT_MIN_SPREAD))
 
         # Phase 1: immediately push MEXC+Bybit pairs so clients see updates fast
-        _push_pairs_to_live_rows(mexc, bybit, {}, min_vol, min_spread)
+        await _push_pairs_to_live_rows(mexc, bybit, {}, min_vol, min_spread)
         _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
 
         candidates: Dict[str, float] = {}
@@ -1121,7 +1309,7 @@ async def compute_once() -> Dict[str, Any]:
         _bingx_count = 0
         async def on_bingx_symbol(norm_sym: str, bingx_row: MarketRow) -> None:
             nonlocal _bingx_count
-            _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
+            await _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
             _bingx_count += 1
             if _bingx_count % 25 == 0:
                 _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
@@ -1151,8 +1339,7 @@ async def compute_once() -> Dict[str, Any]:
         k = r.get("pair_key")
         if not k:
             continue
-        h = PAIR_HISTORY.setdefault(k, [])
-        h.append({
+        entry = {
             "ts": now_ts,
             "spread": float(r.get("spread") or 0.0),
             "buy_price": float(r.get("buy_ask") or math.nan),
@@ -1160,21 +1347,20 @@ async def compute_once() -> Dict[str, Any]:
             "buy_ex": r.get("buy_ex"),
             "sell_ex": r.get("sell_ex"),
             "symbol": r.get("symbol"),
-        })
-        if len(h) > PAIR_HISTORY_MAX:
-            del h[:-PAIR_HISTORY_MAX]
+        }
+        await _rhist_append(k, entry)
 
     # Sync LIVE_ROWS: apply final authoritative data and remove stale pairs
     final_valid_keys = {r["pair_key"] for r in rows_out}
-    for k in [k for k in list(LIVE_ROWS) if k not in final_valid_keys]:
-        LIVE_ROWS.pop(k, None)
+    stale_keys = [k for k in list(LIVE_ROWS) if k not in final_valid_keys]
+    for k in stale_keys:
+        await _rlive_del(k)
     for r in rows_out:
-        LIVE_ROWS[r["pair_key"]] = r
+        await _rlive_set(r["pair_key"], r)
 
-    return {
-        "started_ts": started,
+    # Persist cache metadata to Redis
+    cache_meta = {
         "updated_at": time.strftime("%H:%M:%S"),
-        "rows": rows_out,
         "dbg": {
             "mexc": len(mexc),
             "bybit": len(bybit),
@@ -1182,6 +1368,14 @@ async def compute_once() -> Dict[str, Any]:
             "kept": len(rows_out),
             "took_ms": int((time.time() - started) * 1000),
         },
+    }
+    await _rcache_set(cache_meta)
+
+    return {
+        "started_ts": started,
+        "updated_at": cache_meta["updated_at"],
+        "rows": rows_out,
+        "dbg": cache_meta["dbg"],
     }
 
 
@@ -1248,12 +1442,15 @@ async def api_assets():
 @app.get("/api/data")
 async def api_data(request: Request):
     user = _session_user(request)
-    # Serve from LIVE_ROWS for real-time per-coin incremental updates
-    rows = sorted(LIVE_ROWS.values(), key=lambda r: float(r.get("spread") or 0.0), reverse=True)
+    # Serve from LIVE_ROWS (Redis-backed when available) for real-time per-coin updates
+    live = await _rlive_all()
+    rows = sorted(live.values(), key=lambda r: float(r.get("spread") or 0.0), reverse=True)
     rows, spread_limit, is_admin, is_paid = _limit_rows_for_access(rows, user)
+    # Prefer Redis metadata; fall back to in-memory CACHE
     async with CACHE_LOCK:
-        updated_at = CACHE.get("updated_at") or time.strftime("%H:%M:%S")
-        dbg = dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
+        meta = await _rcache_get()
+        updated_at = meta.get("updated_at") or CACHE.get("updated_at") or time.strftime("%H:%M:%S")
+        dbg = meta.get("dbg") or dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
     data = {
         "updated_at": updated_at,
         "dbg": {**dbg, "kept": len(rows)},
@@ -1271,13 +1468,14 @@ async def api_data(request: Request):
 @app.get("/api/pair")
 async def api_pair(request: Request, pair_key: str):
     user = _session_user(request)
-    row = LIVE_ROWS.get(pair_key)
+    live = await _rlive_all()
+    row = live.get(pair_key)
     if not row:
         return JSONResponse({"ok": False, "error": "pair_not_found"}, status_code=404)
     filtered_rows, spread_limit, _is_admin, _is_paid = _limit_rows_for_access([row], user)
     if not filtered_rows:
         return JSONResponse({"ok": False, "error": "forbidden_by_tier", "spread_limit": spread_limit}, status_code=403)
-    hist = PAIR_HISTORY.get(pair_key, [])
+    hist = await _rhist_get(pair_key)
     return JSONResponse({"ok": True, "row": filtered_rows[0], "history": hist[-PAIR_HISTORY_MAX:]})
 
 
