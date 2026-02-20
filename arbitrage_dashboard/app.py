@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -248,7 +248,7 @@ def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
         else:
             val = to_float(raw)
         if math.isfinite(val) and val > 0:
-            if val > 24 and val % 60 == 0:
+            while val > 24 and val % 60 == 0:
                 val = val / 60.0
             return max(1, int(round(val)))
     return default
@@ -522,6 +522,23 @@ def exec_spread(buy: MarketRow, sell: MarketRow) -> float:
     return (sell.bid - buy.ask) / buy.ask
 
 
+def _adjusted_fund(rate: float, next_ts: float, interval_h: int) -> float:
+    """Return funding rate scaled by the fraction of the current period remaining.
+
+    Adjusted = rate × (time_left / interval)
+    This gives the expected funding payment until the nearest settlement.
+    If next_ts is unknown, returns the full rate (worst-case assumption).
+    """
+    if not math.isfinite(rate):
+        return math.nan
+    if math.isfinite(next_ts) and next_ts > time.time():
+        time_left_h = (next_ts - time.time()) / 3600.0
+        ratio = min(1.0, max(0.0, time_left_h / interval_h)) if interval_h > 0 else 1.0
+    else:
+        ratio = 1.0  # unknown next_ts → assume full period remaining
+    return rate * ratio
+
+
 def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
     def _vol_ok(row: MarketRow) -> bool:
         if row.exchange == "BingX":
@@ -542,7 +559,9 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
             spread = exec_spread(buy, sell)
             if not math.isfinite(spread):
                 continue
-            fund_spread = sell.fund_rate - buy.fund_rate if math.isfinite(sell.fund_rate) and math.isfinite(buy.fund_rate) else math.nan
+            adj_buy = _adjusted_fund(buy.fund_rate, buy.next_funding_ts, buy.funding_interval_h)
+            adj_sell = _adjusted_fund(sell.fund_rate, sell.next_funding_ts, sell.funding_interval_h)
+            fund_spread = adj_sell - adj_buy if math.isfinite(adj_buy) and math.isfinite(adj_sell) else math.nan
             out.append({
                 "spread": spread,
                 "pair_key": "",
@@ -552,6 +571,8 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "sell_bid": sell.bid,
                 "buy_funding": buy.fund_rate,
                 "sell_funding": sell.fund_rate,
+                "buy_funding_adjusted": adj_buy,
+                "sell_funding_adjusted": adj_sell,
                 "funding_spread": fund_spread,
                 "funding_eta_buy": funding_eta_str(buy.next_funding_ts, fallback_hours=buy.funding_interval_h),
                 "funding_eta_sell": funding_eta_str(sell.next_funding_ts, fallback_hours=sell.funding_interval_h),
@@ -760,6 +781,16 @@ CACHE_LOCK = asyncio.Lock()
 PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 PAIR_HISTORY_MAX = 300
 LIVE_ROWS: Dict[str, dict] = {}
+_SSE_QUEUES: List[asyncio.Queue] = []
+
+
+def _broadcast_sse(payload: str) -> None:
+    """Push a message to every connected SSE client (fire-and-forget)."""
+    for q in list(_SSE_QUEUES):
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass  # slow client – skip this tick
 
 HTML_PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Insights</title><link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/>
@@ -858,7 +889,7 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 <div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="refreshBtn">↻ Refresh</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
-<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
@@ -978,7 +1009,7 @@ rows.forEach(r=>{
       <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
     </td>
     ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid),'price','Цена')}
-    ${split(`${fmtPct(r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
+    ${split(`${fmtPct(r.buy_funding,3)} → ${fmtPct(r.buy_funding_adjusted??r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} → ${fmtPct(r.sell_funding_adjusted??r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
     ${split(r.funding_eta_buy||'--:--:--',r.funding_eta_sell||'--:--:--','feta','ETA')}
     <td class='mono ${fundingClass(r.funding_spread)}' data-col='fspread' data-label='F.Спред'>${fmtPct(r.funding_spread,3)}</td>
     <td data-col='spread' data-label=''><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
@@ -1040,7 +1071,16 @@ async function boot(){
   if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} 
   renderExchangeFilters(); render();
 
-  setInterval(refreshData,1000);
+  let _sseActive=false;
+  function connectSSE(){
+    if(typeof EventSource==='undefined')return;
+    const src=new EventSource('/events');
+    src.onopen=()=>{_sseActive=true;};
+    src.onmessage=async e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')await refreshData();}catch(_e){}};
+    src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
+  }
+  connectSSE();
+  setInterval(async()=>{if(!_sseActive)await refreshData();},3000);
 }
 boot();
 </script></body></html>
@@ -1141,6 +1181,7 @@ async def updater_loop():
             async with CACHE_LOCK:
                 CACHE.update(data)
             cycle_started = float(data.get("started_ts", cycle_started)) if isinstance(data, dict) else cycle_started
+            _broadcast_sse(json.dumps({"t": "upd", "at": data.get("updated_at", "")}))
         except Exception:
             pass
         elapsed = max(0.0, time.time() - cycle_started)
@@ -1279,7 +1320,43 @@ async def api_refresh():
     data = await compute_once()
     async with CACHE_LOCK:
         CACHE.update(data)
+    _broadcast_sse(json.dumps({"t": "upd", "at": data.get("updated_at", "")}))
     return JSONResponse({"ok": True})
+
+
+@app.get("/events")
+async def sse_stream(request: Request):
+    """Server-Sent Events endpoint.
+
+    Each connected client holds one open TCP connection.
+    The updater_loop broadcasts a lightweight 'update available' message
+    to all queues; clients then fetch /api/data once.
+    This decouples user count from exchange API call frequency.
+    """
+    q: asyncio.Queue = asyncio.Queue(maxsize=5)
+    _SSE_QUEUES.append(q)
+
+    async def generate():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=25.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # keepalive comment
+        finally:
+            try:
+                _SSE_QUEUES.remove(q)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/auth/pubkey")
