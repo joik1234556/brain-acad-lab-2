@@ -793,7 +793,7 @@ def _broadcast_sse(payload: str) -> None:
             pass  # slow client – skip this tick
 
 HTML_PAGE = r"""
-<!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Insights</title><link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/>
+<!doctype html><html lang="ru"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Insights</title><link rel="icon" type="image/png" href="/static/mmua-logo.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800;900&display=swap" rel="stylesheet"/>
 <style>
 :root,body.theme-classic{--bg:#eaecf4;--panel:#ffffff;--line:#dde0ec;--text:#13161e;--muted:#5d6480;--chip:#ede8df;--good:#0da05c;--bad:#d8233a;--link:#4f46e5;--accent:#4f46e5;--accent2:#7c3aed;--glow:rgba(79,70,229,.18);--shadow:0 4px 28px rgba(79,70,229,.09)}
@@ -883,20 +883,24 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 .chips{gap:6px}.chip{padding:6px 12px;font-size:12px}
 .filter-panel.open{display:block}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
+<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.png" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="lang-box"><span class="lbl" id="lblLang" style="margin:0">Язык</span><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div></div>
 <div class="auth-wrap"><div class="auth-row"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div><div id="authForm" class="auth-row" style="margin-top:8px"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
-<div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> звук</label><select id="soundSel"></select></div></div></div>
+<div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/> <span id="lblSoundCheck">звук</span></label><select id="soundSel"></select></div></div></div>
 <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="lbl" style="margin:0" id="lblExchanges">Биржи</div><button class="btn" id="refreshBtn">↻ Refresh</button></div><div class="chips" id="exchangeBox"></div></div>
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
-<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th>Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" id="thPrice" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th id="thFundingCalc">Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script>
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
 let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
-const I18N={ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа'},uk:{filterTitle:'Фільтр',search:'Пошук за початком токена',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж'},en:{filterTitle:'Filter',search:'Search by token prefix',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell'}};
+const I18N={
+  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку'},
+  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку'},
+  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription'}
+};
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
 const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
@@ -917,47 +921,49 @@ async function encryptWithPub(plain){
   return b64(enc);
 }
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
-function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('btnAuthSubmit').textContent=mode==='register'?'Зарегистрироваться':'Войти';}
+function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
 function closeAuthForm(){document.getElementById('authForm').style.display='none';}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?'Регистрация успешна':'Ошибка регистрации: '+(r.error||'unknown')); if(r.ok)closeAuthForm();}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; if(!u||!p){setAuthStateText('Введите логин и пароль'); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText('Ошибка входа: '+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
 async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
   const u=STATE.user;
+  const t=I18N[STATE.lang]||I18N.ru;
   const adminBox=document.getElementById('adminBox');
   const bLogin=document.getElementById('btnLogin');
   const bReg=document.getElementById('btnRegister');
   const bOut=document.getElementById('btnLogout');
   const lim=STATE.data&&STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit)?`до ${(STATE.data.access.spread_limit*100).toFixed(0)}%`:'';
   if(!u){
-    setAuthStateText(`Гость: доступ ${lim||'до 2% спреда'}`);
+    setAuthStateText(`${t.guestAccess} ${lim||t.guestLimit}`);
     adminBox.style.display='none';
     bLogin.style.display='inline-block';
     bReg.style.display='inline-block';
     bOut.style.display='none';
     return;
   }
-  const status=u.is_admin?'admin (без лимита)':'пользователь (без лимита)';
-  setAuthStateText(`Пользователь: ${u.username} • ${status}`);
+  const status=u.is_admin?t.adminRole:t.userRole;
+  setAuthStateText(`${t.userPrefix} ${u.username} • ${status}`);
   adminBox.style.display=u.is_admin?'block':'none';
   bLogin.style.display='none';
   bReg.style.display='none';
   bOut.style.display='inline-block';
 }
 async function loadUsersAdmin(){
+  const t=I18N[STATE.lang]||I18N.ru;
   const r=await apiGet('/api/admin/users');
-  if(!r.ok){document.getElementById('adminUsers').textContent='Нет доступа'; return;}
+  if(!r.ok){document.getElementById('adminUsers').textContent=t.noAccess; return;}
   const box=document.getElementById('adminUsers');
   box.innerHTML='';
-  r.users.forEach(x=>{const row=document.createElement('div'); row.style.margin='4px 0'; const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?'Отключить подписку':'Подтвердить подписку'; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.textContent=`${x.username} ${x.is_admin?'(admin)':''} ${x.subscription_approved?'✅':'⏳'} `; if(!x.is_admin)row.appendChild(btn); box.appendChild(row);});
+  r.users.forEach(x=>{const row=document.createElement('div'); row.style.margin='4px 0'; const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?t.disableSub:t.approveSub; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.textContent=`${x.username} ${x.is_admin?'(admin)':''} ${x.subscription_approved?'✅':'⏳'} `; if(!x.is_admin)row.appendChild(btn); box.appendChild(row);});
 }
 
 function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase().replace(',', '.').replace('м','m'); if(!s) return 0; const m=s.match(/^([0-9]+(?:\.[0-9]+)?)([kmb])?$/i); if(!m) return parseFloat(s)||0; const v=parseFloat(m[1]); const suf=(m[2]||'').toLowerCase(); if(suf==='k') return v*1e3; if(suf==='m') return v*1e6; if(suf==='b') return v*1e9; return v;}
 
 function logoFor(ex){return STATE.assets.logos?.[ex]||FALLBACK_LOGO[ex]||'';}
 function applyTheme(){document.body.className=STATE.theme; document.getElementById('themeSel').value=STATE.theme; localStorage.setItem('theme',STATE.theme);}
-function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang);}
+function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblLang').textContent=t.lang; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('thPrice').childNodes[0].textContent=t.price; document.getElementById('btnRegister').textContent=t.register; document.getElementById('btnLogin').textContent=t.login; document.getElementById('btnLogout').textContent=t.logout; document.getElementById('btnAuthCancel').textContent=t.cancelBtn; document.getElementById('btnLoadUsers').textContent=t.loadUsers; document.getElementById('lblSoundCheck').textContent=t.soundCheck; const fp=document.getElementById('filterPanel'); const ftBtn=document.getElementById('filterToggleBtn'); ftBtn.textContent=fp.classList.contains('open')?t.hideFilter:t.showFilter; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang); renderAuth();}
 function setCooldown(sec){cooldown=sec; const btn=document.getElementById('refreshBtn'); if(timerId)clearInterval(timerId); timerId=setInterval(()=>{cooldown=Math.max(0,cooldown-1); btn.disabled=cooldown>0; btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh'; document.getElementById('cooldownBadge').textContent=`Manual refresh cooldown: ${cooldown}s`; if(cooldown===0){clearInterval(timerId);timerId=null;}},1000); btn.disabled=true; btn.textContent=`↻ Refresh (${cooldown})`;}
 function pairKey(r){return `${r.symbol}|${r.buy_ex}|${r.sell_ex}`;}
 function isPinnedPair(r){return STATE.pinned.has(pairKey(r));}
@@ -985,7 +991,7 @@ rows=applyFilters(rows);
 sortRows(rows);
 refreshSortIndicators();
 const tb=document.getElementById('tbody');
-if(!rows.length){tb.innerHTML='<tr class="empty-row"><td colspan="10">Ничего не найдено.</td></tr>'; return;}
+if(!rows.length){tb.innerHTML=`<tr class="empty-row"><td colspan="10">${(I18N[STATE.lang]||I18N.ru).notFound}</td></tr>`; return;}
 const top=rows[0];
 const alertKey=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
 if(alertKey!==LAST_ALERT){LAST_ALERT=alertKey; playAlert();}
@@ -1042,7 +1048,7 @@ function bindUiEvents(){
   document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
   document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); try{await apiPost('/api/refresh',{});}catch(err){console.error(err);} await refreshData();});
   document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters);
-  document.getElementById('filterToggleBtn').addEventListener('click',()=>{const p=document.getElementById('filterPanel'); const open=p.classList.toggle('open'); document.getElementById('filterToggleBtn').textContent=open?'Скрыть фильтр':'Показать фильтр';});
+  document.getElementById('filterToggleBtn').addEventListener('click',()=>{const p=document.getElementById('filterPanel'); const open=p.classList.toggle('open'); const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterToggleBtn').textContent=open?t.hideFilter:t.showFilter;});
   document.getElementById('btnRegister').addEventListener('click',()=>openAuthForm('register')); document.getElementById('btnLogin').addEventListener('click',()=>openAuthForm('login')); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnAuthCancel').addEventListener('click',closeAuthForm); document.getElementById('btnAuthSubmit').addEventListener('click',async()=>{if(STATE.authMode==='register') await registerUser(); else await loginUser();}); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
   document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
 }
@@ -1101,6 +1107,7 @@ async def compute_once() -> Dict[str, Any]:
 
         # Phase 1: immediately push MEXC+Bybit pairs so clients see updates fast
         _push_pairs_to_live_rows(mexc, bybit, {}, min_vol, min_spread)
+        _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
 
         candidates: Dict[str, float] = {}
         for source in (mexc, bybit):
@@ -1111,8 +1118,13 @@ async def compute_once() -> Dict[str, Any]:
         sorted_candidates = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
 
         # Phase 2: BingX – update LIVE_ROWS per coin as each symbol's data arrives
+        _bingx_count = 0
         async def on_bingx_symbol(norm_sym: str, bingx_row: MarketRow) -> None:
+            nonlocal _bingx_count
             _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
+            _bingx_count += 1
+            if _bingx_count % 25 == 0:
+                _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
 
         bingx = await load_bingx(session, sorted_candidates, on_symbol=on_bingx_symbol) if enabled.get("BingX", True) else {}
 
