@@ -1,0 +1,303 @@
+const REFRESH_COOLDOWN_SEC=8;
+let LAST_ALERT='';
+let cooldown=0; let timerId=null;
+// ── TimerHub: live per-exchange (+ per-symbol for MEXC) funding countdowns ──
+const EMPTY_TIMER='--:--:--';
+const FUNDING_REFRESH_MS=60000;
+const TimerHub=(function(){
+  const subscribers=new Map();
+  // Cached end timestamps keyed by "exchange" or "exchange:symbol" for MEXC
+  const _exchangeTs=new Map();
+  function formatTime(sec){
+    sec=Math.max(0,Math.floor(sec));
+    const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+    return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  }
+  function _calcIntervalH(sec){const H=3600;return sec<H?1:sec<4*H+1800?4:8;}
+  function _updateIntervalEl(timerId,remainSec){
+    const ivlEl=document.getElementById(timerId.replace(/^timer-/,'ivl-'));
+    if(ivlEl)ivlEl.textContent=_calcIntervalH(remainSec)+'h';
+  }
+  function subscribe(elementId,endTimeMs,exchange,symbol,onFinish=null){
+    const el=document.getElementById(elementId);
+    if(!el){return;}
+    const raw=Number(endTimeMs);
+    const now=Date.now();
+    const exKey=(exchange&&symbol)?`${exchange}:${symbol}`:exchange;
+    // Priority: row-level ts (most precise) > exchange cache (survives re-renders) > 0
+    const rowValid=Number.isFinite(raw)&&raw>now;
+    const cached=_exchangeTs.get(exKey)||0;
+    const endTimeUtc=rowValid?raw:(cached>now?cached:0);
+    el.textContent=endTimeUtc>now?formatTime(Math.floor((endTimeUtc-now)/1000)):EMPTY_TIMER;
+    if(endTimeUtc>now)_updateIntervalEl(elementId,Math.floor((endTimeUtc-now)/1000));
+    subscribers.set(elementId,{el,endTimeUtc,exchange,symbol,exKey,onFinish,finished:endTimeUtc<=now});
+    if(endTimeUtc>now)console.debug(`[TimerHub] subscribe id=${elementId} exKey=${exKey} remaining=${Math.floor((endTimeUtc-now)/1000)}s`);
+  }
+  function update(exchange,newEndTimeMs,symbol){
+    const now=Date.now();
+    const newTs=Number(newEndTimeMs);
+    const exKey=(exchange&&symbol)?`${exchange}:${symbol}`:exchange;
+    _exchangeTs.set(exKey,newTs);
+    for(const[id,sub] of subscribers){
+      if(sub.exKey!==exKey)continue;
+      sub.endTimeUtc=newTs;
+      sub.finished=false;
+      if(!sub.el.isConnected)continue;
+      const remaining=Math.max(0,Math.floor((newTs-now)/1000));
+      sub.el.textContent=newTs>now?formatTime(remaining):EMPTY_TIMER;
+      if(newTs>now)_updateIntervalEl(id,remaining);
+    }
+    console.debug(`[TimerHub] update exKey=${exKey} newEnd=${newTs>0?new Date(newTs).toISOString():'invalid'}`);
+  }
+  function tick(){
+    const now=Date.now();
+    for(const[id,sub] of subscribers){
+      if(!sub.el.isConnected){subscribers.delete(id);continue;}
+      if(sub.endTimeUtc<=0){continue;}// wait for update() to provide a valid ts
+      const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
+      sub.el.textContent=formatTime(remaining);
+      _updateIntervalEl(id,remaining);
+      if(remaining===0&&!sub.finished){sub.finished=true;if(sub.onFinish)sub.onFinish(sub.exchange,id);}
+    }
+  }
+  setInterval(tick,1000);
+  return{subscribe,update,formatTime};
+})();
+
+async function refreshFundingTime(exchange,symbol=''){
+  try{
+    let url=`/api/funding-next?exchange=${encodeURIComponent(exchange)}`;
+    if(symbol)url+=`&symbol=${encodeURIComponent(symbol)}`;
+    const resp=await fetch(url);
+    const data=await resp.json();
+    const ms=Number(data.nextFundingTime||0);
+    if(exchange==='MEXC')console.debug(`[TimerHub] MEXC funding-next sym=${symbol||'(none)'} ms=${ms} future=${ms>Date.now()}`);
+    if(ms>Date.now())TimerHub.update(exchange,ms,symbol);
+    else if(exchange==='MEXC')console.warn(`[TimerHub] MEXC nextFundingTime past/0 sym=${symbol||'(none)'}`);
+  }catch(err){console.error(`[TimerHub] refreshFundingTime failed for ${exchange}:`,err);}
+}
+function updateAllMexcSymbols(){
+  if(!STATE||!STATE.data||!STATE.data.rows)return;
+  const toMexcSym=sym=>sym.replace(/USDT$/,'')+'_USDT';
+  const syms=new Set();
+  STATE.data.rows.forEach(r=>{
+    if(r.buy_ex==='MEXC')syms.add(toMexcSym(r.symbol));
+    if(r.sell_ex==='MEXC')syms.add(toMexcSym(r.symbol));
+  });
+  syms.forEach(s=>refreshFundingTime('MEXC',s));
+}
+function startFundingRefresh(exchanges){
+  exchanges.forEach(ex=>refreshFundingTime(ex));
+  setInterval(()=>{
+    exchanges.forEach(ex=>{try{refreshFundingTime(ex);}catch(_e){}});
+    try{updateAllMexcSymbols();}catch(_e){}
+  },FUNDING_REFRESH_MS);
+}
+// ────────────────────────────────────────────────────────────────────────────
+let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
+const I18N={
+  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку'},
+  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку'},
+  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription'}
+};
+const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
+
+const fmtPct=(x,d=2)=>Number.isFinite(x)?(x*100).toFixed(d)+'%':'N/A';
+const fmtUsd=x=>!Number.isFinite(x)?'N/A':(x>=1e9?(x/1e9).toFixed(2)+'b$':x>=1e6?(x/1e6).toFixed(2)+'m$':x>=1e3?(x/1e3).toFixed(1)+'k$':Math.round(x)+'$');
+const fmtPrice=x=>Number.isFinite(x)?x.toFixed(Math.abs(x)>=1?6:10).replace(/0+$/,'').replace(/\.$/,''):'N/A';
+function authHeaders(base={}){if(STATE.token)base['Authorization']=`Bearer ${STATE.token}`; return base;}
+const apiGet=async p=>(await fetch(p,{cache:'no-store',headers:authHeaders({})})).json();
+const apiPost=async(p,b)=>(await fetch(p,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(b)})).json();
+
+function b64(arr){let s=''; const bytes=new Uint8Array(arr); for(const b of bytes)s+=String.fromCharCode(b); return btoa(s);}
+async function ensurePubKey(){if(STATE.publicKey)return STATE.publicKey; const j=await (await fetch('/api/auth/pubkey',{cache:'no-store'})).json(); STATE.publicKey=j.public_key||''; return STATE.publicKey;}
+async function encryptWithPub(plain){
+  const pem=await ensurePubKey();
+  const clean=pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g,'');
+  const der=Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
+  const key=await crypto.subtle.importKey('spki',der.buffer,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+  const enc=await crypto.subtle.encrypt({name:'RSA-OAEP'},key,new TextEncoder().encode(plain));
+  return b64(enc);
+}
+function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
+function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
+function closeAuthForm(){document.getElementById('authForm').style.display='none'; if(document.getElementById('adminBox').style.display!=='block') document.getElementById('authContainer').style.display='none';}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
+async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
+function renderAuth(){
+  const u=STATE.user;
+  const t=I18N[STATE.lang]||I18N.ru;
+  const adminBox=document.getElementById('adminBox');
+  const authContainer=document.getElementById('authContainer');
+  const bLogin=document.getElementById('btnLogin');
+  const bReg=document.getElementById('btnRegister');
+  const bOut=document.getElementById('btnLogout');
+  const lim=STATE.data&&STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit)?`до ${(STATE.data.access.spread_limit*100).toFixed(0)}%`:'';
+  if(!u){
+    setAuthStateText(`${t.guestAccess} ${lim||t.guestLimit}`);
+    adminBox.style.display='none';
+    // Hide authContainer only if form is also closed
+    if(document.getElementById('authForm').style.display!=='flex') authContainer.style.display='none';
+    bLogin.style.display='inline-block';
+    bReg.style.display='inline-block';
+    bOut.style.display='none';
+    return;
+  }
+  const status=u.is_admin?t.adminRole:t.userRole;
+  setAuthStateText(`${t.userPrefix} ${u.username} • ${status}`);
+  adminBox.style.display=u.is_admin?'block':'none';
+  if(u.is_admin) authContainer.style.display='block';
+  else if(document.getElementById('authForm').style.display!=='flex') authContainer.style.display='none';
+  bLogin.style.display='none';
+  bReg.style.display='none';
+  bOut.style.display='inline-block';
+}
+async function loadUsersAdmin(){
+  const t=I18N[STATE.lang]||I18N.ru;
+  const r=await apiGet('/api/admin/users');
+  if(!r.ok){document.getElementById('adminUsers').textContent=t.noAccess; return;}
+  const box=document.getElementById('adminUsers');
+  box.innerHTML='';
+  r.users.forEach(x=>{const row=document.createElement('div'); row.style.margin='4px 0'; const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?t.disableSub:t.approveSub; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.textContent=`${x.username} ${x.is_admin?'(admin)':''} ${x.subscription_approved?'✅':'⏳'} `; if(!x.is_admin)row.appendChild(btn); box.appendChild(row);});
+}
+
+function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase().replace(',', '.').replace('м','m'); if(!s) return 0; const m=s.match(/^([0-9]+(?:\.[0-9]+)?)([kmb])?$/i); if(!m) return parseFloat(s)||0; const v=parseFloat(m[1]); const suf=(m[2]||'').toLowerCase(); if(suf==='k') return v*1e3; if(suf==='m') return v*1e6; if(suf==='b') return v*1e9; return v;}
+
+function logoFor(ex){return STATE.assets.logos?.[ex]||FALLBACK_LOGO[ex]||'';}
+function applyTheme(){document.body.className=STATE.theme; document.getElementById('themeSel').value=STATE.theme; localStorage.setItem('theme',STATE.theme);}
+function applyLang(){const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterTitle').textContent=t.filterTitle; document.getElementById('lblSearch').textContent=t.search; document.getElementById('lblMinVol').textContent=t.vol; document.getElementById('lblMinSpread').textContent=t.spread; document.getElementById('lblTheme').textContent=t.theme; document.getElementById('lblSound').textContent=t.alert; document.getElementById('lblExchanges').textContent=t.ex; document.getElementById('clearFiltersBtn').textContent=t.clearFilters; document.getElementById('thToken').textContent=t.token; document.getElementById('thPair').textContent=t.pair; document.getElementById('thPrice').childNodes[0].textContent=t.price; document.getElementById('btnRegister').textContent=t.register; document.getElementById('btnLogin').textContent=t.login; document.getElementById('btnLogout').textContent=t.logout; document.getElementById('btnAuthCancel').textContent=t.cancelBtn; document.getElementById('btnLoadUsers').textContent=t.loadUsers; const fp=document.getElementById('filterPanel'); const ftBtn=document.getElementById('filterToggleBtn'); ftBtn.textContent=fp.classList.contains('open')?t.hideFilter:t.showFilter; document.getElementById('langSel').value=STATE.lang; localStorage.setItem('lang',STATE.lang); renderAuth();}
+function setCooldown(sec){cooldown=sec; const btn=document.getElementById('refreshBtn'); if(timerId)clearInterval(timerId); timerId=setInterval(()=>{cooldown=Math.max(0,cooldown-1); btn.disabled=cooldown>0; btn.textContent=cooldown>0?`↻ Refresh (${cooldown})`:'↻ Refresh'; document.getElementById('cooldownBadge').textContent=`Manual refresh cooldown: ${cooldown}s`; if(cooldown===0){clearInterval(timerId);timerId=null;}},1000); btn.disabled=true; btn.textContent=`↻ Refresh (${cooldown})`;}
+function pairKey(r){return `${r.symbol}|${r.buy_ex}|${r.sell_ex}`;}
+function isPinnedPair(r){return STATE.pinned.has(pairKey(r));}
+function togglePinnedPair(r){const k=pairKey(r); if(STATE.pinned.has(k))STATE.pinned.delete(k); else STATE.pinned.add(k); localStorage.setItem('pinnedPairs',JSON.stringify([...STATE.pinned])); render();}
+function refreshSortIndicators(){document.querySelectorAll('th.sortable').forEach(th=>{const key=th.getAttribute('data-sort'); th.querySelector('.arr').textContent=(key===STATE.sortKey)?(STATE.sortDir==='asc'?'▲':'▼'):'↕';});}
+
+function renderExchangeFilters(){const box=document.getElementById('exchangeBox'); box.innerHTML=''; ['MEXC','Bybit','BingX'].forEach(ex=>{const chip=document.createElement('label'); const on=!!STATE.config.enabled?.[ex]; chip.className='chip'+(on?'':' off'); const logo=logoFor(ex); chip.innerHTML=`<input type="checkbox" ${on?'checked':''}/> ${logo?`<img src="${logo}" alt="${ex}"/>`:''} ${ex}`; chip.onclick=async (e)=>{e.preventDefault(); const en={...(STATE.config.enabled||{})}; en[ex]=!en[ex]; STATE.config=await apiPost('/api/config',{enabled:en}); renderExchangeFilters(); await refreshData();}; box.appendChild(chip);});}
+function clearAllFilters(){document.getElementById('q').value=''; document.getElementById('minVol').value='0'; localStorage.setItem('minVolInput','0'); document.getElementById('minSpread').value='0%'; STATE.config.min_vol=0; STATE.config.min_spread=0; STATE.config.enabled={MEXC:true,Bybit:true,BingX:true}; apiPost('/api/config',{min_vol:0,min_spread:0,enabled:STATE.config.enabled}).then(async c=>{STATE.config=c; renderExchangeFilters(); await refreshData();});}
+
+function applyFilters(rows){const q=(document.getElementById('q').value||'').trim().toUpperCase(); const minVol=parseVolumeInput(document.getElementById('minVol').value||'0'); const minSp=parsePctInput(document.getElementById('minSpread').value||'0'); return rows.filter(r=>{const sym=(r.symbol||'').toUpperCase(); if(q && !sym.startsWith(q)) return false; if(minVol>0){const buyOk=Number.isFinite(r.buy_vol)?r.buy_vol>=minVol:true; const sellOk=Number.isFinite(r.sell_vol)?r.sell_vol>=minVol:true; if(!(buyOk&&sellOk)) return false;} if(Number.isFinite(minSp)&&minSp>0&&!(r.spread>=minSp)) return false; return true;});}
+function sortRows(rows){const key=STATE.sortKey; const dir=STATE.sortDir==='asc'?1:-1; rows.sort((a,b)=>{const pa=isPinnedPair(a)?1:0; const pb=isPinnedPair(b)?1:0; if(pa!==pb) return pb-pa; const va=Number.isFinite(a[key])?a[key]:-Infinity; const vb=Number.isFinite(b[key])?b[key]:-Infinity; if(va<vb) return -1*dir; if(va>vb) return 1*dir; return 0;});}
+function fundingClass(v){if(!Number.isFinite(v)) return ''; return v<0?'fneg':'fpos';}
+function spreadClass(v){if(!Number.isFinite(v)) return 'neg'; return v<0?'neg':'pos';}
+
+async function playAlert(){ if(!STATE.sound) return; try{ if(STATE.soundFile){const a=new Audio(`/assets/sounds/${encodeURIComponent(STATE.soundFile)}`); a.volume=0.8; await a.play(); return;} }catch(_e){} try{const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='triangle'; o.frequency.value=920; g.gain.setValueAtTime(0.0001,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.14); o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.15);}catch(_e2){} }
+
+function render(){
+if(!STATE.data)return;
+const srvLimit=(STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit))?STATE.data.access.spread_limit:null;
+document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
+const dbgEl=document.getElementById('dbg'); const dbg=(STATE.data&&STATE.data.dbg)||{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}; if(STATE.user&&STATE.user.is_admin){dbgEl.style.display='inline-block'; dbgEl.textContent=`DBG mexc=${dbg.mexc} bybit=${dbg.bybit} bingx=${dbg.bingx} kept=${dbg.kept} took=${dbg.took_ms}ms`;} else {dbgEl.style.display='none';}
+let rows=[...(STATE.data.rows||[])];
+if(srvLimit!==null){rows=rows.filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
+rows=applyFilters(rows);
+sortRows(rows);
+refreshSortIndicators();
+const tb=document.getElementById('tbody');
+if(!rows.length){tb.innerHTML=`<tr class="empty-row"><td colspan="10">${(I18N[STATE.lang]||I18N.ru).notFound}</td></tr>`; return;}
+const top=rows[0];
+const alertKey=`${top.symbol}|${top.buy_ex}|${top.sell_ex}|${(top.spread||0).toFixed(4)}`;
+if(alertKey!==LAST_ALERT){LAST_ALERT=alertKey; playAlert();}
+
+const split=(a,b,col='',lbl='')=>`<td class='split-cell mono' data-col='${col}' data-label='${lbl}'><div class='line'>${a}</div><div class='line'>${b}</div></td>`;
+const existingRows=new Map([...tb.querySelectorAll('tr[data-key]')].map(tr=>[tr.dataset.key,tr]));
+[...tb.querySelectorAll('tr:not([data-key])')].forEach(tr=>tr.remove());
+rows.forEach(r=>{
+  const rKey=pairKey(r);
+  const pin=isPinnedPair(r);
+  let tr=existingRows.get(rKey);
+  if(!tr){tr=document.createElement('tr'); tr.dataset.key=rKey;}
+  tr.className=pin?'pinned':'';
+  const lbuy=logoFor(r.buy_ex);
+  const lsell=logoFor(r.sell_ex);
+  tr.innerHTML=`
+    <td data-col='fav'><span class='fav'>${pin?'★':'☆'}</span></td>
+    <td class='token' data-col='token' data-label=''>${r.symbol.replace('USDT','')}</td>
+    <td class='split-cell' data-col='pair' data-label=''>
+      <div class='line pair-line long'>⬆ LONG ${lbuy?`<img class='xlogo' src='${lbuy}'/>`:''} <a href='${r.buy_url}' target='_blank'>${r.buy_ex}</a></div>
+      <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
+    </td>
+    ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid),'price','Цена')}
+    ${split(`${fmtPct(r.buy_funding,3)} / <span id="ivl-${rKey}-buy">${r.buy_funding_interval||'8h'}</span>`,`${fmtPct(r.sell_funding,3)} / <span id="ivl-${rKey}-sell">${r.sell_funding_interval||'8h'}</span>`,'funding','Funding')}
+    <td class='split-cell mono' data-col='feta' data-label='ETA'><div class='line'><span id='timer-${rKey}-buy'>--:--:--</span></div><div class='line'><span id='timer-${rKey}-sell'>--:--:--</span></div></td>
+    <td class='mono ${fundingClass(r.funding_spread)}' data-col='fspread' data-label='F.Спред'>${fmtPct(r.funding_spread,3)}</td>
+    <td data-col='spread' data-label=''><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
+    ${split(fmtUsd(r.buy_vol),fmtUsd(r.sell_vol),'vol','Объём')}
+    <td data-col='graf' data-label=''><a class='btn' style='padding:4px 8px;font-size:12px' href='/graph?pair_key=${encodeURIComponent(pairKey(r))}' target='_blank' rel='noopener'>Grafic</a></td>
+  `;
+  tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
+  // Subscribe live countdowns AFTER innerHTML so spans exist in DOM
+  const toMexcSym=sym=>sym.replace(/USDT$/,'')+'_USDT';
+  const bSym=r.buy_ex==='MEXC'?toMexcSym(r.symbol):'';
+  const sSym=r.sell_ex==='MEXC'?toMexcSym(r.symbol):'';
+  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex, bSym, ()=>refreshFundingTime(r.buy_ex,bSym));
+  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex, sSym, ()=>refreshFundingTime(r.sell_ex,sSym));
+  tb.appendChild(tr);
+  existingRows.delete(rKey);
+});
+existingRows.forEach(tr=>tr.remove());
+}
+
+async function refreshData(){
+  try{ STATE.data=await apiGet('/api/data'); }
+  catch(e){ console.error('refreshData failed',e); return; }
+  render();
+}
+
+let EVENTS_BOUND=false;
+function bindUiEvents(){
+  if(EVENTS_BOUND) return;
+  EVENTS_BOUND=true;
+  document.getElementById('q').addEventListener('input',render);
+  document.getElementById('minVol').addEventListener('change',async e=>{const raw=(e.target.value||'0').trim(); const v=Math.max(0,parseVolumeInput(raw)); localStorage.setItem('minVolInput',raw||'0'); try{STATE.config=await apiPost('/api/config',{min_vol:v});}catch(err){console.error(err);} await refreshData();});
+  document.getElementById('minSpread').addEventListener('change',async e=>{const v=parsePctInput(e.target.value||'0'); e.target.value=(v*100).toFixed(2).replace(/\.00$/,'')+'%'; try{STATE.config=await apiPost('/api/config',{min_spread:v});}catch(err){console.error(err);} await refreshData();});
+  document.getElementById('themeSel').addEventListener('change',e=>{STATE.theme=e.target.value; applyTheme();});
+  document.getElementById('langSel').addEventListener('change',e=>{STATE.lang=e.target.value; applyLang(); render();});
+  document.getElementById('soundToggle').addEventListener('change',e=>{STATE.sound=!!e.target.checked; localStorage.setItem('soundOn',STATE.sound?'1':'0'); if(STATE.sound) playAlert();});
+  document.getElementById('soundSel').addEventListener('change',e=>{STATE.soundFile=e.target.value; localStorage.setItem('soundFile',STATE.soundFile);});
+  document.getElementById('refreshBtn').addEventListener('click',async()=>{if(cooldown>0)return; setCooldown(REFRESH_COOLDOWN_SEC); try{await apiPost('/api/refresh',{});}catch(err){console.error(err);} await refreshData();});
+  document.getElementById('clearFiltersBtn').addEventListener('click',clearAllFilters);
+  document.getElementById('filterToggleBtn').addEventListener('click',()=>{const p=document.getElementById('filterPanel'); const open=p.classList.toggle('open'); const t=I18N[STATE.lang]||I18N.ru; document.getElementById('filterToggleBtn').textContent=open?t.hideFilter:t.showFilter;});
+  document.getElementById('btnRegister').addEventListener('click',()=>openAuthForm('register')); document.getElementById('btnLogin').addEventListener('click',()=>openAuthForm('login')); document.getElementById('btnLogout').addEventListener('click',logoutUser); document.getElementById('btnAuthCancel').addEventListener('click',closeAuthForm); document.getElementById('btnAuthSubmit').addEventListener('click',async()=>{if(STATE.authMode==='register') await registerUser(); else await loginUser();}); document.getElementById('btnLoadUsers').addEventListener('click',loadUsersAdmin);
+  document.querySelectorAll('th.sortable').forEach(th=>{th.addEventListener('click',()=>{const k=th.getAttribute('data-sort'); if(STATE.sortKey===k){STATE.sortDir=STATE.sortDir==='asc'?'desc':'asc';}else{STATE.sortKey=k;STATE.sortDir='desc';} render();});});
+}
+
+function parsePctInput(v){const t=String(v||'').replace(/%/g,'').replace(',','.').trim(); if(!t)return 0; const n=parseFloat(t); return Number.isFinite(n)?(n/100):0;}
+
+async function boot(){
+  bindUiEvents();
+  try{
+    STATE.config=await apiGet('/api/config');
+  }catch(e){
+    console.error('config load failed',e);
+    STATE.config={refresh_sec:1,min_vol:0,min_spread:0,enabled:{MEXC:true,Bybit:true,BingX:true}};
+  }
+  try{ await loadMe(); }catch(e){ console.error('loadMe failed',e); STATE.user=null; }
+  try{ STATE.data=await apiGet('/api/data'); }catch(e){ console.error('data load failed',e); STATE.data={rows:[],updated_at:'—',dbg:{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}}; }
+  try{ STATE.assets=await apiGet('/api/assets'); }catch(e){ console.error('assets load failed',e); STATE.assets={logos:{},sounds:[]}; }
+
+  document.getElementById('minVol').value=localStorage.getItem('minVolInput')||String(STATE.config.min_vol||0);
+  document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100)+'%';
+  document.getElementById('soundToggle').checked=STATE.sound;
+
+  applyTheme(); applyLang(); renderAuth();
+  const ss=document.getElementById('soundSel'); ss.innerHTML='';
+  (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);});
+  if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} 
+  renderExchangeFilters(); render(); updateAllMexcSymbols();
+  // MEXC per-symbol timers are handled by updateAllMexcSymbols() — exchange-level has no effect
+  startFundingRefresh(['Bybit','BingX']);
+
+  let _sseActive=false;
+  function connectSSE(){
+    if(typeof EventSource==='undefined')return;
+    const src=new EventSource('/events');
+    src.onopen=()=>{_sseActive=true;};
+    src.onmessage=async e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')await refreshData();}catch(_e){}};
+    src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
+  }
+  connectSSE();
+  setInterval(async()=>{if(!_sseActive)await refreshData();},3000);
+}
+boot();
