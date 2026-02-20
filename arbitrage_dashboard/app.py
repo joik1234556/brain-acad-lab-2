@@ -62,11 +62,18 @@ MAX_FREE_SPREAD = 0.02
 SESSION_TTL_SEC = 7 * 24 * 3600
 
 MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
+MEXC_FUNDING_RATE_BTC = "https://contract.mexc.com/api/v1/contract/funding_rate/BTC_USDT"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
 BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 BINGX_BOOK_TICKER = "https://open-api.bingx.com/openApi/swap/v2/quote/bookTicker"
 BINGX_TICKER_24H = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 BINGX_PREMIUM_INDEX = "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex"
+# Timestamps > this value are in milliseconds; divide by 1000 to get seconds
+TIMESTAMP_MS_THRESHOLD = 1e12
+# How long to reuse a cached MEXC next-funding-time (seconds)
+MEXC_FUNDING_CACHE_TTL_SEC = 60
+# Cache for MEXC next-funding time fetched directly (avoids per-row API calls)
+_MEXC_FUND_CACHE: dict = {"ts_ms": 0, "at": 0.0}
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -1079,7 +1086,7 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 .chips{gap:6px}.chip{padding:6px 12px;font-size:12px}
 .filter-panel.open{display:block}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo-128.png" width="44" height="44" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
+<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" width="44" height="44" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
 <div id="authContainer" class="auth-wrap" style="display:none"><div id="authForm" class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
 <div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/></label><select id="soundSel"></select></div></div></div>
@@ -1105,27 +1112,30 @@ const TimerHub=(function(){
     const el=document.getElementById(elementId);
     if(!el){return;}
     const endTimeUtc=Number(endTimeMs);
-    if(isNaN(endTimeUtc)||endTimeUtc<=0){el.textContent=EMPTY_TIMER; return;}
-    const sec=Math.max(0,Math.floor((endTimeUtc-Date.now())/1000));
-    el.textContent=formatTime(sec);
-    subscribers.set(elementId,{el,endTimeUtc,exchange,onFinish,finished:sec===0});
-    console.debug(`[TimerHub] subscribe id=${elementId} exchange=${exchange} end=${new Date(endTimeUtc).toISOString()} remaining=${sec}s`);
+    const valid=Number.isFinite(endTimeUtc)&&endTimeUtc>Date.now();
+    el.textContent=valid?formatTime(Math.floor((endTimeUtc-Date.now())/1000)):EMPTY_TIMER;
+    // Always register subscriber so update() can push a valid ts later (e.g. MEXC bulk ticker omits nextSettleTime)
+    subscribers.set(elementId,{el,endTimeUtc:valid?endTimeUtc:0,exchange,onFinish,finished:!valid});
+    if(valid)console.debug(`[TimerHub] subscribe id=${elementId} exchange=${exchange} end=${new Date(endTimeUtc).toISOString()} remaining=${Math.floor((endTimeUtc-Date.now())/1000)}s`);
   }
   function update(exchange,newEndTimeMs){
     const now=Date.now();
+    const newTs=Number(newEndTimeMs);
     for(const[id,sub] of subscribers){
       if(sub.exchange!==exchange)continue;
-      sub.endTimeUtc=Number(newEndTimeMs);
+      sub.endTimeUtc=newTs;
       sub.finished=false;
-      const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
-      if(sub.el.isConnected)sub.el.textContent=formatTime(remaining);
+      if(!sub.el.isConnected)continue;
+      const remaining=Math.max(0,Math.floor((newTs-now)/1000));
+      sub.el.textContent=newTs>now?formatTime(remaining):EMPTY_TIMER;
     }
-    console.debug(`[TimerHub] update exchange=${exchange} newEnd=${new Date(newEndTimeMs).toISOString()}`);
+    console.debug(`[TimerHub] update exchange=${exchange} newEnd=${newTs>0?new Date(newTs).toISOString():'invalid'}`);
   }
   function tick(){
     const now=Date.now();
     for(const[id,sub] of subscribers){
       if(!sub.el.isConnected){subscribers.delete(id);continue;}
+      if(sub.endTimeUtc<=0){continue;}// wait for update() to provide a valid ts
       const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
       sub.el.textContent=formatTime(remaining);
       if(remaining===0&&!sub.finished){sub.finished=true;if(sub.onFinish)sub.onFinish(sub.exchange,id);}
@@ -1140,7 +1150,9 @@ async function refreshFundingTime(exchange){
     const resp=await fetch(`/api/funding-next?exchange=${encodeURIComponent(exchange)}`);
     const data=await resp.json();
     const ms=Number(data.nextFundingTime||0);
+    if(exchange==='MEXC')console.debug(`[TimerHub] MEXC funding-next response:`,data,`ms=${ms}, future=${ms>Date.now()}`);
     if(ms>Date.now())TimerHub.update(exchange,ms);
+    else if(exchange==='MEXC')console.warn(`[TimerHub] MEXC nextFundingTime is 0 or in the past — timers will show ${EMPTY_TIMER}`);
   }catch(err){console.error(`[TimerHub] refreshFundingTime failed for ${exchange}:`,err);}
 }
 function startFundingRefresh(exchanges){
@@ -1519,6 +1531,9 @@ async def api_funding_next(exchange: str = ""):
     Retrieves live data via _rlive_all() and returns the minimum future
     buy_next_ts_ms or sell_next_ts_ms for rows belonging to that exchange
     (case-insensitive match).
+    For MEXC, if live rows carry no valid timestamp (bulk ticker omits
+    nextSettleTime), falls back to a cached direct call to the MEXC
+    funding_rate/BTC_USDT endpoint (refreshed at most once per 60 s).
     """
     live = await _rlive_all()
     ex = exchange.strip().lower()
@@ -1533,6 +1548,32 @@ async def api_funding_next(exchange: str = ""):
             ts = int(row.get("sell_next_ts_ms") or 0)
             if ts > now_ms and (nearest_funding_ms == 0 or ts < nearest_funding_ms):
                 nearest_funding_ms = ts
+
+    # MEXC bulk ticker often omits nextSettleTime — fall back to direct API call
+    if ex == "mexc" and nearest_funding_ms == 0:
+        cached_ts = _MEXC_FUND_CACHE["ts_ms"]
+        cached_at = _MEXC_FUND_CACHE["at"]
+        if cached_ts > now_ms and (time.time() - cached_at) < MEXC_FUNDING_CACHE_TTL_SEC:
+            nearest_funding_ms = cached_ts
+        else:
+            try:
+                async with aiohttp.ClientSession() as _s:
+                    raw = await fetch_json(_s, MEXC_FUNDING_RATE_BTC)
+                d = raw.get("data") if isinstance(raw, dict) else None
+                if isinstance(d, dict):
+                    ts_raw = d.get("nextSettleTime") or d.get("nextFundingTime")
+                    ts_val = to_float(ts_raw)
+                    if math.isfinite(ts_val) and ts_val > 0:
+                        # MEXC returns ms timestamps (> TIMESTAMP_MS_THRESHOLD) or seconds
+                        ts_ms = int(ts_val) if ts_val > TIMESTAMP_MS_THRESHOLD else int(ts_val * 1000)
+                        if ts_ms > now_ms:
+                            _MEXC_FUND_CACHE["ts_ms"] = ts_ms
+                            _MEXC_FUND_CACHE["at"] = time.time()
+                            nearest_funding_ms = ts_ms
+                            print(f"[MEXC] next funding: {datetime.fromtimestamp(ts_ms/1000, tz=timezone.utc).isoformat()}")
+            except Exception as _e:
+                print(f"[MEXC] funding-next fallback error: {_e}")
+
     return JSONResponse({"nextFundingTime": nearest_funding_ms, "exchange": exchange})
 
 
