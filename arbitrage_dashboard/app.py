@@ -1097,7 +1097,7 @@ async def updater_loop():
             cycle_started = float(data.get("started_ts", cycle_started)) if isinstance(data, dict) else cycle_started
             _broadcast_sse(json.dumps({"t": "upd", "at": data.get("updated_at", "")}))
         except Exception:
-            pass
+            logger.exception("updater_loop: compute_once raised an error")
         elapsed = max(0.0, time.time() - cycle_started)
         wait_for = max(0.05, float(CFG.get("refresh_sec", DEFAULT_REFRESH_SEC)) - elapsed)
         await asyncio.sleep(wait_for)

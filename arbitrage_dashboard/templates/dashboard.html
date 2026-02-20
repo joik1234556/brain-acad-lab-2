@@ -1,7 +1,18 @@
-<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Arbitrage Insights</title><link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/><link rel="icon" type="image/png" sizes="64x64" href="/static/favicon-64.png"/><link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
-<link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800;900&display=swap" rel="stylesheet"/>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Arbitrage Insights</title>
+<link rel="icon" type="image/svg+xml" href="/static/mmua-logo.svg"/>
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon-64.png"/>
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/css/dashboard.css"/>
-</head><body class="theme-classic"><div class="wrap">
+</head>
+<body class="theme-classic"><div class="wrap">
 <div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo-128.png" width="44" height="44" alt="Arbitrage Insights logo" onerror="this.onerror=null;this.src='/static/mmua-logo.svg'"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
 <div id="authContainer" class="auth-wrap" style="display:none"><div id="authForm" class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
@@ -11,4 +22,5 @@
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" id="thPrice" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th id="thFundingCalc">Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script src="/static/js/dashboard.js"></script>
-</body></html>
+</body>
+</html>
