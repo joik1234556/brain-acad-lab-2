@@ -1086,7 +1086,7 @@ td[data-col=graf] a{display:block;width:100%;text-align:center;padding:9px 8px!i
 .chips{gap:6px}.chip{padding:6px 12px;font-size:12px}
 .filter-panel.open{display:block}}
 </style></head><body class="theme-classic"><div class="wrap">
-<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" width="44" height="44" alt="Arbitrage Insights logo"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
+<div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo.svg" width="44" height="44" alt="Arbitrage Insights logo" onerror="this.onerror=null;this.src='/static/mmua-logo-128.png'"/><span>Arbitrage Insights</span></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
 <div id="authContainer" class="auth-wrap" style="display:none"><div id="authForm" class="auth-row"><input id="authUser" placeholder="login"/><input id="authPass" type="password" placeholder="password"/><button class="btn" id="btnAuthSubmit">Продолжить</button><button class="btn" id="btnAuthCancel">Скрыть</button></div><div id="adminBox" style="display:none;margin-top:8px"><button class="btn" id="btnLoadUsers">Загрузить пользователей</button><div id="adminUsers" class="small" style="margin-top:6px"></div></div></div>
 <div class="filter-head"><div class="filter-title" id="filterTitle">Фильтр</div><div class="filter-actions"><button class="btn" id="filterToggleBtn">Показать фильтр</button><button class="btn" id="clearFiltersBtn">Очистить фильтр</button></div></div>
 <div id="filterPanel" class="filter-panel"><div class="filter-grid"><div><div class="lbl" id="lblSearch">Поиск монеты</div><input id="q" placeholder="BTC"/></div><div><div class="lbl" id="lblMinVol">Оборот 24h (USD)</div><input id="minVol" type="text" placeholder="1m / 0.5m / 250k"/></div><div><div class="lbl" id="lblMinSpread">OpenSpread, %</div><input id="minSpread" type="text"/></div><div><div class="lbl" id="lblTheme">Тема</div><select id="themeSel"><option value="theme-dark-blue">Dark Blue</option><option value="theme-light">Light</option><option value="theme-classic">Classic Gray</option><option value="theme-binance">Binance Dark</option><option value="theme-tradingview">TradingView Dark</option></select></div><div><div class="lbl" id="lblSound">Оповещение</div><div style="display:flex;gap:6px"><label class="chip"><input type="checkbox" id="soundToggle"/></label><select id="soundSel"></select></div></div></div>
@@ -1103,6 +1103,8 @@ const EMPTY_TIMER='--:--:--';
 const FUNDING_REFRESH_MS=60000;
 const TimerHub=(function(){
   const subscribers=new Map();
+  // Per-exchange cached timestamp -- survives render() re-subscribe cycles
+  const _exchangeTs=new Map();
   function formatTime(sec){
     sec=Math.max(0,Math.floor(sec));
     const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
@@ -1111,16 +1113,20 @@ const TimerHub=(function(){
   function subscribe(elementId,endTimeMs,exchange,onFinish=null){
     const el=document.getElementById(elementId);
     if(!el){return;}
-    const endTimeUtc=Number(endTimeMs);
-    const valid=Number.isFinite(endTimeUtc)&&endTimeUtc>Date.now();
-    el.textContent=valid?formatTime(Math.floor((endTimeUtc-Date.now())/1000)):EMPTY_TIMER;
-    // Always register subscriber so update() can push a valid ts later (e.g. MEXC bulk ticker omits nextSettleTime)
-    subscribers.set(elementId,{el,endTimeUtc:valid?endTimeUtc:0,exchange,onFinish,finished:!valid});
-    if(valid)console.debug(`[TimerHub] subscribe id=${elementId} exchange=${exchange} end=${new Date(endTimeUtc).toISOString()} remaining=${Math.floor((endTimeUtc-Date.now())/1000)}s`);
+    const raw=Number(endTimeMs);
+    const now=Date.now();
+    // Priority: row-level ts (most precise) > exchange cache (survives re-renders) > 0 (show EMPTY_TIMER)
+    const rowValid=Number.isFinite(raw)&&raw>now;
+    const cached=_exchangeTs.get(exchange)||0;
+    const endTimeUtc=rowValid?raw:(cached>now?cached:0);
+    el.textContent=endTimeUtc>now?formatTime(Math.floor((endTimeUtc-now)/1000)):EMPTY_TIMER;
+    subscribers.set(elementId,{el,endTimeUtc,exchange,onFinish,finished:endTimeUtc<=now});
+    if(endTimeUtc>now)console.debug(`[TimerHub] subscribe id=${elementId} exchange=${exchange} end=${new Date(endTimeUtc).toISOString()} remaining=${Math.floor((endTimeUtc-now)/1000)}s`);
   }
   function update(exchange,newEndTimeMs){
     const now=Date.now();
     const newTs=Number(newEndTimeMs);
+    _exchangeTs.set(exchange,newTs);
     for(const[id,sub] of subscribers){
       if(sub.exchange!==exchange)continue;
       sub.endTimeUtc=newTs;
@@ -1285,7 +1291,7 @@ rows.forEach(r=>{
       <div class='line pair-line short'>⬇ SHORT ${lsell?`<img class='xlogo' src='${lsell}'/>`:''} <a href='${r.sell_url}' target='_blank'>${r.sell_ex}</a></div>
     </td>
     ${split(fmtPrice(r.buy_ask),fmtPrice(r.sell_bid),'price','Цена')}
-    ${split(`${fmtPct(r.buy_funding,3)} → ${fmtPct(r.buy_funding_adjusted??r.buy_funding,3)} • ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} → ${fmtPct(r.sell_funding_adjusted??r.sell_funding,3)} • ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
+    ${split(`${fmtPct(r.buy_funding,3)} / ${r.buy_funding_interval||'8h'}`,`${fmtPct(r.sell_funding,3)} / ${r.sell_funding_interval||'8h'}`,'funding','Funding')}
     <td class='split-cell mono' data-col='feta' data-label='ETA'><div class='line'><span id='timer-${rKey}-buy'>--:--:--</span></div><div class='line'><span id='timer-${rKey}-sell'>--:--:--</span></div></td>
     <td class='mono ${fundingClass(r.funding_spread)}' data-col='fspread' data-label='F.Спред'>${fmtPct(r.funding_spread,3)}</td>
     <td data-col='spread' data-label=''><span class='spread-pill ${spreadClass(r.spread)}'>${fmtPct(r.spread,2)}</span></td>
@@ -1294,8 +1300,8 @@ rows.forEach(r=>{
   `;
   tr.querySelector('.fav').onclick=()=>togglePinnedPair(r);
   // Subscribe live countdowns AFTER innerHTML so spans exist in DOM
-  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex);
-  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex);
+  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex, ()=>refreshFundingTime(r.buy_ex));
+  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex, ()=>refreshFundingTime(r.sell_ex));
   tb.appendChild(tr);
   existingRows.delete(rKey);
 });
