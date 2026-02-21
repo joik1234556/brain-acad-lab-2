@@ -22,5 +22,8 @@
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" id="thPrice" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th id="thFundingCalc">Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
 <script src="/static/js/dashboard.js"></script>
+<!-- Server-injected initial snapshot — consumed by boot() for zero-latency first render -->
+<script type="application/json" id="__initial-data__">{{ initial_data | safe }}</script>
+<script type="application/json" id="__initial-config__">{{ initial_config | safe }}</script>
 </body>
 </html>

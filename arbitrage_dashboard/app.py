@@ -247,6 +247,16 @@ def _pick_ts(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
+def _safe_float(v: float) -> Optional[float]:
+    """Return v as float, or None (JSON null) if not finite.
+
+    Starlette's JSONResponse uses allow_nan=False, so math.nan / inf in
+    a response body causes a 500 error.  Wrap all exchange-sourced floats
+    that may be nan with this helper before putting them in a row dict.
+    """
+    return v if math.isfinite(v) else None
+
+
 def _pick_ts_or_delta(d: dict, keys: List[str]) -> float:
     """Like _pick_ts but also handles MEXC-style remaining-time deltas.
 
@@ -603,19 +613,21 @@ def best_pairs(rows: List[MarketRow], min_vol: float) -> List[Dict[str, Any]]:
                 "sell_ex": sell.exchange,
                 "buy_ask": buy.ask,
                 "sell_bid": sell.bid,
-                "buy_funding": buy.fund_rate,
-                "sell_funding": sell.fund_rate,
-                "buy_funding_adjusted": adj_buy,
-                "sell_funding_adjusted": adj_sell,
-                "funding_spread": fund_spread,
+                # Use _safe_float for all exchange-sourced floats that may be nan.
+                # Starlette JSONResponse uses allow_nan=False → nan causes HTTP 500.
+                "buy_funding": _safe_float(buy.fund_rate),
+                "sell_funding": _safe_float(sell.fund_rate),
+                "buy_funding_adjusted": _safe_float(adj_buy),
+                "sell_funding_adjusted": _safe_float(adj_sell),
+                "funding_spread": _safe_float(fund_spread),
                 "funding_eta_buy": funding_eta_str(buy.next_funding_ts, fallback_hours=buy.funding_interval_h),
                 "funding_eta_sell": funding_eta_str(sell.next_funding_ts, fallback_hours=sell.funding_interval_h),
                 "buy_next_ts_ms": int(buy.next_funding_ts * 1000) if math.isfinite(buy.next_funding_ts) else 0,
                 "sell_next_ts_ms": int(sell.next_funding_ts * 1000) if math.isfinite(sell.next_funding_ts) else 0,
                 "buy_funding_interval": f"{buy.funding_interval_h}h",
                 "sell_funding_interval": f"{sell.funding_interval_h}h",
-                "buy_vol": buy.vol24_usd,
-                "sell_vol": sell.vol24_usd,
+                "buy_vol": _safe_float(buy.vol24_usd),
+                "sell_vol": _safe_float(sell.vol24_usd),
                 "buy_url": buy.url,
                 "sell_url": sell.url,
             })
@@ -1125,9 +1137,44 @@ async def updater_loop():
         await asyncio.sleep(wait_for)
 
 
+def _spread_sort_key(r: dict) -> float:
+    """Safe sort key for rows — converts 'spread' to float, returns 0.0 on error."""
+    try:
+        return float(r.get("spread") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    """Serve the dashboard with server-injected initial snapshot.
+
+    Embedding the current LIVE_ROWS snapshot directly into the HTML lets the
+    browser render the full table on first paint — no extra /api/data round-trip.
+    Auth token lives in localStorage (not a cookie), so this page request is
+    always guest-level; the JS calls /api/me + /api/data in parallel on load
+    to upgrade to the authenticated view within one SSE cycle.
+    """
+    live = await _rlive_all()
+    rows = sorted(live.values(), key=_spread_sort_key, reverse=True)
+    # Page request never carries Bearer token (token is in localStorage, not cookies)
+    rows, spread_limit, _is_admin, _is_paid = _limit_rows_for_access(rows, None)
+    async with CACHE_LOCK:
+        meta = await _rcache_get()
+        updated_at = meta.get("updated_at") or CACHE.get("updated_at") or ""
+        dbg = meta.get("dbg") or dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
+    initial_data = json.dumps({
+        "updated_at": updated_at,
+        "dbg": {**dbg, "kept": len(rows)},
+        "rows": rows,
+        "access": {"username": None, "is_admin": False, "subscription_approved": False, "spread_limit": spread_limit},
+    }, ensure_ascii=False)
+    initial_config = json.dumps(CFG, ensure_ascii=False)
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request,
+        "initial_data": initial_data,
+        "initial_config": initial_config,
+    })
 
 
 @app.get("/api/config")
@@ -1262,7 +1309,7 @@ async def api_data(request: Request):
     user = _session_user(request)
     # Serve from LIVE_ROWS (Redis-backed when available) for real-time per-coin updates
     live = await _rlive_all()
-    rows = sorted(live.values(), key=lambda r: float(r.get("spread") or 0.0), reverse=True)
+    rows = sorted(live.values(), key=_spread_sort_key, reverse=True)
     rows, spread_limit, is_admin, is_paid = _limit_rows_for_access(rows, user)
     # Prefer Redis metadata; fall back to in-memory CACHE
     async with CACHE_LOCK:

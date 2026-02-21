@@ -1,6 +1,8 @@
 const REFRESH_COOLDOWN_SEC=8;
 let LAST_ALERT='';
 let cooldown=0; let timerId=null;
+// Read a <script type="application/json"> element by id (server-injected data)
+function _readJsonEl(id){try{const el=document.getElementById(id);return el?JSON.parse(el.textContent):null;}catch(_e){return null;}}
 // ── TimerHub: live per-exchange (+ per-symbol for MEXC) funding countdowns ──
 const EMPTY_TIMER='--:--:--';
 const FUNDING_REFRESH_MS=60000;
@@ -136,9 +138,48 @@ async function encryptWithPub(plain){
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
 function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
 function closeAuthForm(){document.getElementById('authForm').style.display='none'; if(document.getElementById('adminBox').style.display!=='block') document.getElementById('authContainer').style.display='none';}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
-async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
+async function registerUser(){
+  const btn=document.getElementById('btnAuthSubmit');
+  if(btn.disabled)return;
+  const u=document.getElementById('authUser').value.trim();
+  const p=document.getElementById('authPass').value;
+  const t=I18N[STATE.lang]||I18N.ru;
+  if(!u||!p){setAuthStateText(t.enterCreds);return;}
+  btn.disabled=true; const origTxt=btn.textContent; btn.textContent='...';
+  try{
+    let payload={username:u,password:p};
+    try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){}
+    const r=await apiPost('/api/auth/register',payload);
+    setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown'));
+    if(r.ok)closeAuthForm();
+  }catch(err){setAuthStateText(t.regErr+(err.message||'network_error'));}
+  finally{btn.disabled=false;btn.textContent=origTxt;}
+}
+async function loginUser(){
+  const btn=document.getElementById('btnAuthSubmit');
+  if(btn.disabled)return;
+  const u=document.getElementById('authUser').value.trim();
+  const p=document.getElementById('authPass').value;
+  const t=I18N[STATE.lang]||I18N.ru;
+  if(!u||!p){setAuthStateText(t.enterCreds);return;}
+  btn.disabled=true; const origTxt=btn.textContent; btn.textContent='...';
+  try{
+    let payload={username:u,password:p};
+    try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){}
+    const r=await apiPost('/api/auth/login',payload);
+    if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login'));return;}
+    STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null;
+    closeAuthForm(); renderAuth();
+    try{await refreshData();}catch(_e){}
+  }catch(err){setAuthStateText(t.loginErr+(err.message||'network_error'));}
+  finally{btn.disabled=false;btn.textContent=origTxt;}
+}
+async function logoutUser(){
+  try{await apiPost('/api/auth/logout',{});}catch(_e){}
+  STATE.token=''; STATE.user=null; localStorage.removeItem('authToken');
+  closeAuthForm(); renderAuth();
+  try{await refreshData();}catch(_e){}
+}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
   const u=STATE.user;
@@ -283,26 +324,38 @@ async function boot(){
   bindUiEvents();
   // Pre-warm RSA key import in background so login/register won't pause on first click
   _importPubKey().catch(err=>console.debug('[auth] RSA key pre-warm failed (will retry on login):',err));
-  try{
-    STATE.config=await apiGet('/api/config');
-  }catch(e){
-    console.error('config load failed',e);
-    STATE.config={refresh_sec:1,min_vol:0,min_spread:0,enabled:{MEXC:true,Bybit:true,BingX:true}};
-  }
-  try{ await loadMe(); }catch(e){ console.error('loadMe failed',e); STATE.user=null; }
-  try{ STATE.data=await apiGet('/api/data'); }catch(e){ console.error('data load failed',e); STATE.data={rows:[],updated_at:'—',dbg:{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}}; }
-  try{ STATE.assets=await apiGet('/api/assets'); }catch(e){ console.error('assets load failed',e); STATE.assets={logos:{},sounds:[]}; }
+
+  // ── Phase 1: instant first render using server-injected snapshot ──────────
+  // The server embeds current LIVE_ROWS + CFG into the HTML as JSON elements.
+  // This means the table renders on first paint — zero API round-trips needed.
+  const serverConfig=_readJsonEl('__initial-config__');
+  const serverData=_readJsonEl('__initial-data__');
+  STATE.config=serverConfig||{refresh_sec:1,min_vol:0,min_spread:0,enabled:{MEXC:true,Bybit:true,BingX:true}};
+  STATE.data=serverData||null;
 
   document.getElementById('minVol').value=localStorage.getItem('minVolInput')||String(STATE.config.min_vol||0);
   document.getElementById('minSpread').value=String((STATE.config.min_spread||0)*100)+'%';
   document.getElementById('soundToggle').checked=STATE.sound;
+  applyTheme(); applyLang(); renderExchangeFilters();
+  if(STATE.data)render(); // First paint — table visible immediately
 
-  applyTheme(); applyLang(); renderAuth();
+  // ── Phase 2: parallel fetch of auth info + fresh data + assets ───────────
+  // All three calls fire simultaneously; none blocks the others.
+  const [_me,_data,_assets]=await Promise.allSettled([
+    loadMe(),                  // sets STATE.user; clears token if expired
+    apiGet('/api/data'),       // get fresh data with auth token (full rows for logged-in users)
+    apiGet('/api/assets'),     // logos + sounds
+  ]);
+  if(_data.status==='fulfilled'&&_data.value&&_data.value.rows)STATE.data=_data.value;
+  if(_assets.status==='fulfilled'&&_assets.value)STATE.assets=_assets.value||{logos:{},sounds:[]};
+
   const ss=document.getElementById('soundSel'); ss.innerHTML='';
   (STATE.assets.sounds||[]).forEach(n=>{const o=document.createElement('option'); o.value=n; o.textContent=n; ss.appendChild(o);});
-  if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;} else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);} 
-  renderExchangeFilters(); render(); updateAllMexcSymbols();
-  // MEXC per-symbol timers are handled by updateAllMexcSymbols() — exchange-level has no effect
+  if((STATE.assets.sounds||[]).includes(STATE.soundFile)){ss.value=STATE.soundFile;}
+  else if((STATE.assets.sounds||[]).length){STATE.soundFile=STATE.assets.sounds[0]; ss.value=STATE.soundFile; localStorage.setItem('soundFile',STATE.soundFile);}
+
+  renderAuth(); renderExchangeFilters(); render(); updateAllMexcSymbols();
+  // MEXC per-symbol timers handled by updateAllMexcSymbols() — exchange-level has no effect
   startFundingRefresh(['Bybit','BingX']);
 
   let _sseActive=false;
