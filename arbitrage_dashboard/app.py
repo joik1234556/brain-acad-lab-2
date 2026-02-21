@@ -295,6 +295,11 @@ def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
         else:
             val = to_float(raw)
         if math.isfinite(val) and val > 0:
+            # BingX returns fundingInterval in milliseconds (e.g. 28800000 ms = 8h).
+            # Detect ms values: anything >= 1h expressed in ms (3_600_000).
+            # Divide by 1000 to get seconds, then the while-loop converts s→h.
+            if val >= 3_600_000:
+                val = val / 1000.0
             while val > 24 and val % 60 == 0:
                 val = val / 60.0
             return max(1, int(round(val)))
