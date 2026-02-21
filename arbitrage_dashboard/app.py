@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.gzip import GZipMiddleware
 import uvicorn
 
 from models import MarketRow
@@ -64,6 +65,8 @@ DEFAULT_REFRESH_SEC = 1
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
+# Shorter timeout used for background interval-refresh fetches (best-effort, not critical path)
+INTERVAL_FETCH_TIMEOUT = 5
 MAX_BINGX_SYMBOLS = 260
 BINGX_CONCURRENCY = 18
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
@@ -88,11 +91,11 @@ _MEXC_FUND_CACHE: dict = {"ts_ms": 0, "at": 0.0}
 # Per-symbol MEXC funding time cache  key = symbol e.g. "BTC_USDT"
 _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
 # Per-symbol MEXC funding interval cache  key = symbol e.g. "BTC_USDT" → hours
-# Populated from /api/v1/contract/funding_rate/{symbol} (fetched lazily once per hour)
+# Populated by _mexc_intervals_refresher() background task (once per hour)
 _MEXC_INTERVALS: Dict[str, int] = {}
 # Unix timestamp of last full _MEXC_INTERVALS refresh (refetch when > TTL stale)
 _MEXC_INTERVALS_AT: float = 0.0
-MEXC_INTERVALS_TTL = 300   # seconds; re-fetch if stale (short TTL catches failures fast)
+MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refresh hourly
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
@@ -347,16 +350,21 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
 async def _refresh_mexc_intervals(session: aiohttp.ClientSession, symbols: List[str]) -> None:
     """Fetch collectCycle per MEXC symbol from funding_rate/{sym} endpoint.
 
-    Called at most once per MEXC_INTERVALS_TTL seconds.  Semaphore of 5
-    avoids rate limiting on MEXC (20 concurrent would trigger 429 errors).
+    Called by _mexc_intervals_refresher() background task — NOT on the critical
+    path of load_mexc/compute_once.  Semaphore(10) + INTERVAL_FETCH_TIMEOUT
+    keeps total time ~20s for 200 symbols without hammering MEXC.
     """
     global _MEXC_INTERVALS, _MEXC_INTERVALS_AT
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(10)
 
     async def _one(sym: str) -> None:
         async with sem:
             try:
-                d = await fetch_json(session, f"https://contract.mexc.com/api/v1/contract/funding_rate/{sym}")
+                async with session.get(
+                    f"https://contract.mexc.com/api/v1/contract/funding_rate/{sym}",
+                    timeout=aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT),
+                ) as resp:
+                    d = await resp.json(content_type=None)
                 if isinstance(d, dict) and d.get("success"):
                     cc = (d.get("data") or {}).get("collectCycle", 0)
                     ih = _norm_interval_h(cc)
@@ -369,6 +377,34 @@ async def _refresh_mexc_intervals(session: aiohttp.ClientSession, symbols: List[
     _MEXC_INTERVALS_AT = time.time()
 
 
+async def _mexc_intervals_refresher() -> None:
+    """Background task: refresh MEXC per-symbol funding intervals once per hour.
+
+    Runs independently of compute_once() so it NEVER blocks the main data-fetch
+    critical path.  Uses its own aiohttp session to avoid session-closed errors.
+    """
+    await asyncio.sleep(5)  # short initial delay so app finishes booting first
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 4)
+            async with aiohttp.ClientSession(timeout=timeout) as bg_session:
+                ticker_data = await fetch_json(bg_session, MEXC_TICKERS)
+                items = (ticker_data.get("data") if isinstance(ticker_data, dict) else ticker_data) or []
+                if isinstance(items, list):
+                    syms = [
+                        str(it.get("symbol", ""))
+                        for it in items
+                        if isinstance(it, dict)
+                        and "_" in str(it.get("symbol", ""))
+                        and str(it.get("symbol", "")).split("_", 1)[1].upper() == "USDT"
+                    ]
+                    await _refresh_mexc_intervals(bg_session, syms)
+                    logger.info("[MEXC] background interval refresh done (%d symbols)", len(syms))
+        except Exception as exc:
+            logger.warning("[MEXC] _mexc_intervals_refresher error: %s", exc)
+        await asyncio.sleep(MEXC_INTERVALS_TTL)
+
+
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
@@ -379,19 +415,8 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
         if not isinstance(items, list):
             return out
 
-        # Collect all MEXC USDT-perpetual symbols
-        all_syms = [
-            str(it.get("symbol") or "")
-            for it in items
-            if isinstance(it, dict) and "_" in str(it.get("symbol") or "")
-            and str(it.get("symbol") or "").split("_", 1)[1].upper() == "USDT"
-        ]
-
-        # Refresh per-symbol funding intervals once per hour.
-        # funding_rate/{sym} returns collectCycle (hours) — the ONLY reliable MEXC source.
-        if time.time() - _MEXC_INTERVALS_AT > MEXC_INTERVALS_TTL:
-            await _refresh_mexc_intervals(session, all_syms)
-            logger.info("[MEXC] refreshed funding intervals for %d symbols", len(all_syms))
+        # _MEXC_INTERVALS is populated by the _mexc_intervals_refresher() background task.
+        # load_mexc() does NOT fetch intervals inline — that would block compute_once().
 
         for it in items:
             if not isinstance(it, dict):
@@ -926,6 +951,7 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 async def lifespan(_: FastAPI):
     await _redis_connect()
     asyncio.create_task(updater_loop())
+    asyncio.create_task(_mexc_intervals_refresher())  # non-blocking MEXC interval refresh
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())
     yield
@@ -934,9 +960,11 @@ async def lifespan(_: FastAPI):
 
 ensure_assets()
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=500)  # ~120KB → ~25KB (-80%)
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+_START_TIME = time.time()  # used by /health endpoint
 CFG = load_config()
 CACHE = {"updated_at": None, "rows": [], "dbg": {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}}
 CACHE_LOCK = asyncio.Lock()
@@ -945,6 +973,10 @@ PAIR_HISTORY_MAX = 300
 LIVE_ROWS: Dict[str, dict] = {}
 _SSE_QUEUES: List[asyncio.Queue] = []
 
+# Cache-busting version tag based on startup time.
+# Every server restart (= every deploy) produces a new tag, so browsers
+# re-download CSS/JS.  Between restarts they serve from cache for free.
+_STATIC_VER = hex(int(_START_TIME))[2:]
 # ---------------------------------------------------------------------------
 # Optional Redis layer
 # Set REDIS_URL env var (e.g. redis://localhost:6379/0) to enable Redis.
@@ -1284,6 +1316,22 @@ async def index(request: Request):
         "request": request,
         "initial_data": initial_data,
         "initial_config": initial_config,
+        "sv": _STATIC_VER,
+    })
+
+
+@app.get("/health")
+async def health():
+    """Health-check endpoint for nginx/systemd/uptime monitors.
+
+    Returns HTTP 200 as long as the process is alive.  Nginx and systemd
+    can poll this to detect hangs and auto-restart the service proactively.
+    """
+    live = await _rlive_all()
+    return JSONResponse({
+        "ok": True,
+        "uptime_s": int(time.time() - _START_TIME),
+        "rows_cached": len(live),
     })
 
 
@@ -1458,7 +1506,7 @@ async def api_pair(request: Request, pair_key: str):
 
 @app.get("/graph", response_class=HTMLResponse)
 async def graph_page(request: Request):
-    return templates.TemplateResponse("graph.html", {"request": request})
+    return templates.TemplateResponse("graph.html", {"request": request, "sv": _STATIC_VER})
 
 
 @app.post("/api/refresh")

@@ -10,7 +10,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800;900&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/dashboard.css"/>
+<link rel="stylesheet" href="/static/css/dashboard.css?v={{ sv }}"/>
 </head>
 <body class="theme-classic"><div class="wrap">
 <div class="filter-card"><div class="topbar"><div class="brand"><img src="/static/mmua-logo-128.png" width="44" height="44" alt="Arbitrage Insights logo" onerror="this.onerror=null;this.src='/static/mmua-logo.svg'"/><div class="brand-title"><span>Arbitrage Insights</span><a class="tg-btn" href="https://t.me/+7JTnamdxatc3NTU6" target="_blank" rel="noopener noreferrer" title="Telegram community"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L8.32 14.617 5.36 13.71c-.656-.204-.67-.656.136-.971l10.808-4.164c.548-.196 1.026.12.59.646z"/></svg></a></div></div><div class="topbar-right"><div class="lang-box"><select id="langSel"><option value="ru">🇷🇺 Русский</option><option value="uk">🇺🇦 Українська</option><option value="en">🇬🇧 English</option></select></div><div class="auth-inline"><button class="btn" id="btnRegister">Регистрация</button><button class="btn" id="btnLogin">Вход</button><button class="btn" id="btnLogout">Выход</button><span class="small" id="authState">Гость: ограничение до 2% спреда</span></div></div></div>
@@ -21,7 +21,7 @@
 <div class="meta"><div class="badge" id="updated">Updated: —</div><div class="badge" id="dbg">DBG: —</div><div class="badge" id="cooldownBadge">Manual refresh cooldown: 0s</div></div>
 <div class="table-wrap"><table><thead><tr><th>Fav</th><th id="thToken">Токен</th><th id="thPair">Покупка / Продажа</th><th class="sortable" id="thPrice" data-sort="buy_ask">Цена вход/выход<span class="arr"></span></th><th class="sortable" data-sort="buy_funding">Funding buy/sell<span class="arr"></span></th><th id="thFundingCalc">Funding calc in</th><th class="sortable" data-sort="funding_spread">F Spread (adj)<span class="arr"></span></th><th class="sortable" data-sort="spread">Open Spread<span class="arr"></span></th><th class="sortable" data-sort="buy_vol">Volume buy/sell<span class="arr"></span></th><th>Grafic</th></tr></thead><tbody id="tbody"><tr><td colspan="10">Загрузка...</td></tr></tbody></table></div>
 </div>
-<script src="/static/js/dashboard.js"></script>
+<script src="/static/js/dashboard.js?v={{ sv }}"></script>
 <!-- Server-injected initial snapshot — consumed by boot() for zero-latency first render -->
 <script type="application/json" id="__initial-data__">{{ initial_data | safe }}</script>
 <script type="application/json" id="__initial-config__">{{ initial_config | safe }}</script>
