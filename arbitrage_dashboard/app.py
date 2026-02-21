@@ -92,7 +92,7 @@ _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
 _MEXC_INTERVALS: Dict[str, int] = {}
 # Unix timestamp of last full _MEXC_INTERVALS refresh (refetch when > TTL stale)
 _MEXC_INTERVALS_AT: float = 0.0
-MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change
+MEXC_INTERVALS_TTL = 300   # seconds; re-fetch if stale (short TTL catches failures fast)
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
@@ -347,11 +347,11 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
 async def _refresh_mexc_intervals(session: aiohttp.ClientSession, symbols: List[str]) -> None:
     """Fetch collectCycle per MEXC symbol from funding_rate/{sym} endpoint.
 
-    Called at most once per MEXC_INTERVALS_TTL seconds.  Uses a semaphore of 20
-    so all ~200 requests complete in a few seconds without hammering the API.
+    Called at most once per MEXC_INTERVALS_TTL seconds.  Semaphore of 5
+    avoids rate limiting on MEXC (20 concurrent would trigger 429 errors).
     """
     global _MEXC_INTERVALS, _MEXC_INTERVALS_AT
-    sem = asyncio.Semaphore(20)
+    sem = asyncio.Semaphore(5)
 
     async def _one(sym: str) -> None:
         async with sem:
@@ -627,6 +627,14 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                 else:
                     dbg["from_bulk"] += 1
 
+                # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
+                # prem (premiumIndex) has no interval field; contract has fundingIntervalHours.
+                bingx_interval_h = (
+                    _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
+                    or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingTime", "fundingRateInterval"], default=0)
+                    or 8
+                )
+
                 market_row = MarketRow(
                     exchange="BingX",
                     bid=bid,
@@ -634,17 +642,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     last=last,
                     vol24_usd=vol,
                     fund_rate=fund,
-                    fund24_est=funding_24h_estimate(fund),
+                    fund24_est=funding_24h_estimate(fund, bingx_interval_h),
                     url=bingx_trade_url(raw),
                     next_funding_ts=next_ts,
-                    funding_interval_h=(
-                        # Try prem first (fundingIntervalHours or fundingInterval in hours/ms),
-                        # then contract (fundingInterval in hours OR fundingTime in minutes).
-                        # Fall back to 8h (BingX standard perpetual interval).
-                        _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
-                        or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingTime", "fundingRateInterval"], default=0)
-                        or 8
-                    ),
+                    funding_interval_h=bingx_interval_h,
                 )
                 if on_symbol is not None:
                     try:
