@@ -418,12 +418,20 @@ async def _mexc_intervals_refresher() -> None:
     2. For any symbols NOT covered by detail, fall back to per-symbol funding_rate/{sym}.
     This means after one refresh cycle _MEXC_INTERVALS contains all intervals and
     the first compute_once() already shows correct per-coin funding periods.
+
+    NOTE: Session uses sock_read/sock_connect timeouts (no ``total``).
+    A session-level ``total`` timeout kills ALL pending requests after N seconds —
+    with 200 per-symbol calls, the per-symbol fallback loop would die after ~40s
+    having cached only ~8 symbols.  Per-request timeouts in _refresh_mexc_intervals
+    handle individual call limits correctly without a hard session deadline.
     """
     global _MEXC_INTERVALS_AT
-    await asyncio.sleep(3)  # short initial delay so app finishes booting first
+    # No initial sleep: fire immediately so contract/detail (~500ms) completes
+    # well before compute_once() first run at t+5s.
     while True:
         try:
-            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 8)
+            # sock_connect + sock_read per operation; no total session deadline
+            timeout = aiohttp.ClientTimeout(sock_connect=5, sock_read=15)
             async with aiohttp.ClientSession(timeout=timeout) as bg_session:
                 # Step 1: fast bulk init from contract/detail (fundingInterval in seconds)
                 detail_found = 0
