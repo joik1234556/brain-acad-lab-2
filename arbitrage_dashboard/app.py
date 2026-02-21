@@ -261,14 +261,20 @@ def _pick_ts(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
-def _safe_float(v: float) -> Optional[float]:
-    """Return v as float, or None (JSON null) if not finite.
+def _safe_float(v: Any) -> Optional[float]:
+    """Return v as float, or None (JSON null) if not finite or not a number.
 
     Starlette's JSONResponse uses allow_nan=False, so math.nan / inf in
     a response body causes a 500 error.  Wrap all exchange-sourced floats
-    that may be nan with this helper before putting them in a row dict.
+    that may be nan/None with this helper before putting them in a row dict.
     """
-    return v if math.isfinite(v) else None
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _pick_ts_or_delta(d: dict, keys: List[str]) -> float:
