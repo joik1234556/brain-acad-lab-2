@@ -14,11 +14,11 @@ const TimerHub=(function(){
     return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
   }
   function _calcIntervalH(sec){const H=3600;return sec<H?1:sec<4*H+1800?4:8;}
-  function _updateIntervalEl(timerId,remainSec){
+  function _updateIntervalEl(timerId,fundingInterval){
     const ivlEl=document.getElementById(timerId.replace(/^timer-/,'ivl-'));
-    if(ivlEl)ivlEl.textContent=_calcIntervalH(remainSec)+'h';
+    if(ivlEl&&fundingInterval)ivlEl.textContent=fundingInterval;
   }
-  function subscribe(elementId,endTimeMs,exchange,symbol,onFinish=null){
+  function subscribe(elementId,endTimeMs,exchange,symbol,fundingInterval,fallbackEta,onFinish=null){
     const el=document.getElementById(elementId);
     if(!el){return;}
     const raw=Number(endTimeMs);
@@ -28,9 +28,9 @@ const TimerHub=(function(){
     const rowValid=Number.isFinite(raw)&&raw>now;
     const cached=_exchangeTs.get(exKey)||0;
     const endTimeUtc=rowValid?raw:(cached>now?cached:0);
-    el.textContent=endTimeUtc>now?formatTime(Math.floor((endTimeUtc-now)/1000)):EMPTY_TIMER;
-    if(endTimeUtc>now)_updateIntervalEl(elementId,Math.floor((endTimeUtc-now)/1000));
-    subscribers.set(elementId,{el,endTimeUtc,exchange,symbol,exKey,onFinish,finished:endTimeUtc<=now});
+    el.textContent=endTimeUtc>now?formatTime(Math.floor((endTimeUtc-now)/1000)):(fallbackEta||EMPTY_TIMER);
+    if(fundingInterval)_updateIntervalEl(elementId,fundingInterval);
+    subscribers.set(elementId,{el,endTimeUtc,exchange,symbol,exKey,fundingInterval,fallbackEta,onFinish,finished:endTimeUtc<=now});
     if(endTimeUtc>now)console.debug(`[TimerHub] subscribe id=${elementId} exKey=${exKey} remaining=${Math.floor((endTimeUtc-now)/1000)}s`);
   }
   function update(exchange,newEndTimeMs,symbol){
@@ -44,8 +44,8 @@ const TimerHub=(function(){
       sub.finished=false;
       if(!sub.el.isConnected)continue;
       const remaining=Math.max(0,Math.floor((newTs-now)/1000));
-      sub.el.textContent=newTs>now?formatTime(remaining):EMPTY_TIMER;
-      if(newTs>now)_updateIntervalEl(id,remaining);
+      sub.el.textContent=newTs>now?formatTime(remaining):(sub.fallbackEta||EMPTY_TIMER);
+      _updateIntervalEl(id,sub.fundingInterval);
     }
     console.debug(`[TimerHub] update exKey=${exKey} newEnd=${newTs>0?new Date(newTs).toISOString():'invalid'}`);
   }
@@ -53,10 +53,14 @@ const TimerHub=(function(){
     const now=Date.now();
     for(const[id,sub] of subscribers){
       if(!sub.el.isConnected){subscribers.delete(id);continue;}
-      if(sub.endTimeUtc<=0){continue;}// wait for update() to provide a valid ts
+      if(sub.endTimeUtc<=0){
+        // Show server-computed ETA while waiting for live timestamp
+        if(sub.fallbackEta&&sub.el.textContent===EMPTY_TIMER)sub.el.textContent=sub.fallbackEta;
+        continue;
+      }
       const remaining=Math.max(0,Math.floor((sub.endTimeUtc-now)/1000));
       sub.el.textContent=formatTime(remaining);
-      _updateIntervalEl(id,remaining);
+      // Interval label doesn't change per-second; updated only in subscribe()/update()
       if(remaining===0&&!sub.finished){sub.finished=true;if(sub.onFinish)sub.onFinish(sub.exchange,id);}
     }
   }
@@ -111,19 +115,29 @@ const apiPost=async(p,b)=>(await fetch(p,{method:'POST',headers:authHeaders({'Co
 
 function b64(arr){let s=''; const bytes=new Uint8Array(arr); for(const b of bytes)s+=String.fromCharCode(b); return btoa(s);}
 async function ensurePubKey(){if(STATE.publicKey)return STATE.publicKey; const j=await (await fetch('/api/auth/pubkey',{cache:'no-store'})).json(); STATE.publicKey=j.public_key||''; return STATE.publicKey;}
+// Singleton promise so concurrent callers share one importKey operation.
+// On failure the promise is reset to null so the next call can retry.
+let _keyImportPromise=null;
+async function _importPubKey(){
+  if(!_keyImportPromise){
+    _keyImportPromise=ensurePubKey().then(pem=>{
+      const clean=pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g,'');
+      const der=Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
+      return crypto.subtle.importKey('spki',der.buffer,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+    }).catch(err=>{_keyImportPromise=null; throw err;});
+  }
+  return _keyImportPromise;
+}
 async function encryptWithPub(plain){
-  const pem=await ensurePubKey();
-  const clean=pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g,'');
-  const der=Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
-  const key=await crypto.subtle.importKey('spki',der.buffer,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+  const key=await _importPubKey();
   const enc=await crypto.subtle.encrypt({name:'RSA-OAEP'},key,new TextEncoder().encode(plain));
   return b64(enc);
 }
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
 function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
 function closeAuthForm(){document.getElementById('authForm').style.display='none'; if(document.getElementById('adminBox').style.display!=='block') document.getElementById('authContainer').style.display='none';}
-async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
-async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{payload={username:u,password:p,username_enc:await encryptWithPub(u),password_enc:await encryptWithPub(p)};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
+async function registerUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){} const r=await apiPost('/api/auth/register',payload); setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown')); if(r.ok)closeAuthForm();}
+async function loginUser(){const u=document.getElementById('authUser').value.trim(); const p=document.getElementById('authPass').value; const t=I18N[STATE.lang]||I18N.ru; if(!u||!p){setAuthStateText(t.enterCreds); return;} let payload={username:u,password:p}; try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){} const r=await apiPost('/api/auth/login',payload); if(!r.ok){setAuthStateText(t.loginErr+(r.error||'bad_login')); return;} STATE.token=r.token||''; localStorage.setItem('authToken',STATE.token); STATE.user=r.user||null; closeAuthForm(); await refreshData(); renderAuth();}
 async function logoutUser(){await apiPost('/api/auth/logout',{}); STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); closeAuthForm(); await refreshData(); renderAuth();}
 async function loadMe(){if(!STATE.token){STATE.user=null; return;} const r=await apiGet('/api/auth/me'); if(!r.ok){STATE.token=''; STATE.user=null; localStorage.removeItem('authToken'); return;} STATE.user=r.user;}
 function renderAuth(){
@@ -231,8 +245,8 @@ rows.forEach(r=>{
   const toMexcSym=sym=>sym.replace(/USDT$/,'')+'_USDT';
   const bSym=r.buy_ex==='MEXC'?toMexcSym(r.symbol):'';
   const sSym=r.sell_ex==='MEXC'?toMexcSym(r.symbol):'';
-  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex, bSym, ()=>refreshFundingTime(r.buy_ex,bSym));
-  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex, sSym, ()=>refreshFundingTime(r.sell_ex,sSym));
+  TimerHub.subscribe(`timer-${rKey}-buy`, r.buy_next_ts_ms||0, r.buy_ex, bSym, r.buy_funding_interval||'', r.funding_eta_buy||'', ()=>refreshFundingTime(r.buy_ex,bSym));
+  TimerHub.subscribe(`timer-${rKey}-sell`,r.sell_next_ts_ms||0, r.sell_ex, sSym, r.sell_funding_interval||'', r.funding_eta_sell||'', ()=>refreshFundingTime(r.sell_ex,sSym));
   tb.appendChild(tr);
   existingRows.delete(rKey);
 });
@@ -267,6 +281,8 @@ function parsePctInput(v){const t=String(v||'').replace(/%/g,'').replace(',','.'
 
 async function boot(){
   bindUiEvents();
+  // Pre-warm RSA key import in background so login/register won't pause on first click
+  _importPubKey().catch(err=>console.debug('[auth] RSA key pre-warm failed (will retry on login):',err));
   try{
     STATE.config=await apiGet('/api/config');
   }catch(e){
