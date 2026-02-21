@@ -300,9 +300,12 @@ def _norm_interval_h(raw_val) -> int:
         return 0
     if val >= 3_600_000:          # ms  → seconds
         val = val / 1000.0
-    while val > 24 and val % 60 == 0:   # seconds or minutes → hours
-        val = val / 60.0
-    return max(1, int(round(val)))
+    # Round to nearest integer before modulo to avoid float precision issues
+    # (e.g. 28800.0000001 % 60 is not exactly 0.0 in some float representations)
+    ival = int(round(val))
+    while ival > 24 and ival % 60 == 0:   # seconds or minutes → hours
+        ival = ival // 60
+    return max(1, ival)
 
 
 def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
