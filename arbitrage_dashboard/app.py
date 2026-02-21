@@ -100,7 +100,8 @@ MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refres
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
 # Per-symbol BingX funding interval cache, key = norm_sym e.g. "BTCUSDT" → hours.
-# Populated by _infer_bingx_interval_h() during load_bingx (no extra API calls needed).
+# Filled from: contracts endpoint (fundingIntervalHours if present) → per-symbol
+# premiumIndex (when bulk prem is absent for a symbol) → _infer_bingx_interval_h.
 _BINGX_INTERVALS: Dict[str, int] = {}
 
 
@@ -463,6 +464,7 @@ async def _mexc_intervals_refresher() -> None:
                 # Step 2: per-symbol fallback for any symbols not found in detail
                 ticker_data = await fetch_json(bg_session, MEXC_TICKERS)
                 items = (ticker_data.get("data") if isinstance(ticker_data, dict) else ticker_data) or []
+                still_missing_count = 0
                 if isinstance(items, list):
                     all_syms = [
                         str(it.get("symbol", ""))
@@ -475,10 +477,19 @@ async def _mexc_intervals_refresher() -> None:
                     if missing:
                         await _refresh_mexc_intervals(bg_session, missing)
                         logger.info("[MEXC] per-symbol fallback filled %d missing intervals", len(missing))
-                    logger.info("[MEXC] interval refresh done (%d total cached)", len(_MEXC_INTERVALS))
+                    # Count symbols still missing after per-symbol pass (e.g. timeouts/failures)
+                    still_missing_count = sum(1 for s in all_syms if s not in _MEXC_INTERVALS)
+                    logger.info("[MEXC] interval refresh done (%d total cached, %d still missing)",
+                                len(_MEXC_INTERVALS), still_missing_count)
         except Exception as exc:
             logger.warning("[MEXC] _mexc_intervals_refresher error: %s", exc)
-        await asyncio.sleep(MEXC_INTERVALS_TTL)
+            still_missing_count = 1  # treat error as "incomplete" → retry sooner
+        # Adaptive retry: if some symbols failed (e.g. rate-limit / timeout), retry in 2
+        # minutes so they are filled quickly.  Once all cached, respect the full TTL.
+        sleep_time = 120 if still_missing_count > 0 else MEXC_INTERVALS_TTL
+        if still_missing_count:
+            logger.info("[MEXC] %d symbols missing; retrying in %ds", still_missing_count, sleep_time)
+        await asyncio.sleep(sleep_time)
 
 
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
@@ -714,6 +725,19 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                         ih = _pick_int(prem, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
                         if ih > 0 and norm_sym not in _BINGX_INTERVALS:
                             _BINGX_INTERVALS[norm_sym] = ih
+                elif not prem and norm_sym not in _BINGX_INTERVALS:
+                    # book+tick are in bulk but prem is absent for this symbol, AND we
+                    # don't have a cached interval.  Fetch per-symbol prem to get
+                    # nextFundingTime (needed to infer the interval).
+                    # After first successful fetch the interval is cached → no extra
+                    # call on subsequent cycles.
+                    async with sem:
+                        fp = await fetch_symbol(BINGX_PREMIUM_INDEX)
+                    if isinstance(fp, dict) and fp:
+                        prem = fp
+                        ih = _pick_int(prem, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
+                        if ih > 0:
+                            _BINGX_INTERVALS[norm_sym] = ih
 
                 bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
                 ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
@@ -753,11 +777,11 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["from_bulk"] += 1
 
                 # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
-                # Priority 1: _BINGX_INTERVALS (pre-populated from BINGX_CONTRACTS which
-                #   has fundingIntervalHours; also cached from previous cycles)
-                # Priority 2: contract dict inline (same source, belt-and-suspenders)
-                # Priority 3: infer from nextFundingTime UTC alignment
-                # Priority 4: default 8h
+                # Priority 1: _BINGX_INTERVALS (from contracts or per-symbol prem above)
+                # Priority 2: contract dict inline (belt-and-suspenders in case pre-pop missed it)
+                # Priority 3: infer from nextFundingTime UTC alignment (now reliable: per-symbol
+                #   prem was fetched above when bulk prem was empty)
+                # Priority 4: default 8h (correct for most BingX coins)
                 bingx_interval_h = (
                     _BINGX_INTERVALS.get(norm_sym, 0)
                     or _pick_int(contract, ["fundingIntervalHours", "fundingInterval", "fundingTime", "settleCycle"], default=0)
