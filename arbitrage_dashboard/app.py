@@ -99,6 +99,11 @@ MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refres
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
+# Per-symbol BingX funding interval cache, key = norm_sym e.g. "BTCUSDT" → hours.
+# Populated by _bingx_intervals_refresher() background task (bulk prem first, per-symbol fallback).
+_BINGX_INTERVALS: Dict[str, int] = {}
+_BINGX_INTERVALS_AT: float = 0.0
+BINGX_INTERVALS_TTL = 3600  # seconds; refresh hourly
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -386,35 +391,130 @@ async def _refresh_mexc_intervals(session: aiohttp.ClientSession, symbols: List[
 async def _mexc_intervals_refresher() -> None:
     """Background task: refresh MEXC per-symbol funding intervals once per hour.
 
-    Runs independently of compute_once() so it NEVER blocks the main data-fetch
-    critical path.  Uses its own aiohttp session to avoid session-closed errors.
+    Strategy (fast startup):
+    1. Try MEXC_CONTRACT_DETAIL first (ONE bulk call, has ``fundingInterval`` seconds
+       for every symbol) — populates _MEXC_INTERVALS within ~500 ms of startup.
+    2. For any symbols NOT covered by detail, fall back to per-symbol funding_rate/{sym}.
+    This means after one refresh cycle _MEXC_INTERVALS contains all intervals and
+    the first compute_once() already shows correct per-coin funding periods.
     """
-    await asyncio.sleep(5)  # short initial delay so app finishes booting first
+    global _MEXC_INTERVALS_AT
+    await asyncio.sleep(3)  # short initial delay so app finishes booting first
     while True:
         try:
-            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 4)
+            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 8)
             async with aiohttp.ClientSession(timeout=timeout) as bg_session:
+                # Step 1: fast bulk init from contract/detail (fundingInterval in seconds)
+                detail_found = 0
+                try:
+                    detail_data = await fetch_json(bg_session, MEXC_CONTRACT_DETAIL)
+                    for c in (detail_data.get("data") or [] if isinstance(detail_data, dict) else []):
+                        sym = str(c.get("symbol") or "")
+                        if not sym:
+                            continue
+                        ih = _norm_interval_h(c.get("fundingInterval", 0))
+                        if ih > 0:
+                            _MEXC_INTERVALS[sym] = ih
+                            detail_found += 1
+                    if detail_found:
+                        _MEXC_INTERVALS_AT = time.time()
+                        logger.info("[MEXC] %d intervals from contract/detail", detail_found)
+                except Exception as exc:
+                    logger.warning("[MEXC] contract/detail fetch failed: %s", exc)
+
+                # Step 2: per-symbol fallback for any symbols not found in detail
                 ticker_data = await fetch_json(bg_session, MEXC_TICKERS)
                 items = (ticker_data.get("data") if isinstance(ticker_data, dict) else ticker_data) or []
                 if isinstance(items, list):
-                    syms = [
+                    all_syms = [
                         str(it.get("symbol", ""))
                         for it in items
                         if isinstance(it, dict)
                         and "_" in str(it.get("symbol", ""))
                         and str(it.get("symbol", "")).split("_", 1)[1].upper() == "USDT"
                     ]
-                    await _refresh_mexc_intervals(bg_session, syms)
-                    logger.info("[MEXC] background interval refresh done (%d symbols)", len(syms))
+                    missing = [s for s in all_syms if s not in _MEXC_INTERVALS]
+                    if missing:
+                        await _refresh_mexc_intervals(bg_session, missing)
+                        logger.info("[MEXC] per-symbol fallback filled %d missing intervals", len(missing))
+                    logger.info("[MEXC] interval refresh done (%d total cached)", len(_MEXC_INTERVALS))
         except Exception as exc:
             logger.warning("[MEXC] _mexc_intervals_refresher error: %s", exc)
         await asyncio.sleep(MEXC_INTERVALS_TTL)
 
 
+async def _bingx_intervals_refresher() -> None:
+    """Background task: refresh BingX per-symbol funding intervals once per hour.
+
+    Strategy:
+    1. Fetch bulk BINGX_PREMIUM_INDEX (free, no extra API calls) and check for
+       ``fundingInterval`` field (present in some BingX API versions, in ms).
+    2. For any symbol where bulk prem has no interval, fetch single-symbol
+       premiumIndex (has ``fundingInterval`` in ms reliably).
+    Populates _BINGX_INTERVALS[norm_sym] = hours.
+    """
+    global _BINGX_INTERVALS, _BINGX_INTERVALS_AT
+    await asyncio.sleep(4)  # short initial delay so app finishes booting first
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 8)
+            async with aiohttp.ClientSession(timeout=timeout) as bg_session:
+                # Step 1: bulk premiumIndex (one call — some BingX API versions include fundingInterval)
+                prem_data = await fetch_json(bg_session, BINGX_PREMIUM_INDEX)
+                prem_items = _as_list(prem_data)
+                missing_raws: list = []
+                for item in prem_items:
+                    raw = str(item.get("symbol") or "")
+                    if not raw or "-" not in raw:
+                        continue
+                    base, quote = raw.split("-", 1)
+                    if quote.upper() != "USDT":
+                        continue
+                    norm = normalize_usdt(base)
+                    ih = _pick_int(item, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
+                    if ih > 0:
+                        _BINGX_INTERVALS[norm] = ih
+                    else:
+                        missing_raws.append((norm, raw))
+
+                # Step 2: per-symbol premiumIndex for symbols not covered by bulk
+                sem = asyncio.Semaphore(10)
+
+                async def _fetch_bingx_one(norm: str, raw: str) -> None:
+                    async with sem:
+                        try:
+                            resp = await fetch_json(
+                                bg_session, BINGX_PREMIUM_INDEX,
+                                params={"symbol": raw},
+                            )
+                            # Single-symbol response may be wrapped in data dict or list
+                            if isinstance(resp, dict):
+                                item = resp.get("data") or resp
+                                if isinstance(item, list) and item:
+                                    item = item[0]
+                            elif isinstance(resp, list) and resp:
+                                item = resp[0]
+                            else:
+                                item = {}
+                            ih = _pick_int(item, ["fundingInterval", "fundingIntervalHours", "fundingRateInterval"], default=0)
+                            if ih > 0:
+                                _BINGX_INTERVALS[norm] = ih
+                        except Exception as exc:
+                            logger.debug("[BingX] interval fetch %s failed: %s", raw, exc)
+
+                await asyncio.gather(*[_fetch_bingx_one(n, r) for n, r in missing_raws])
+                _BINGX_INTERVALS_AT = time.time()
+                logger.info("[BingX] interval refresh done (%d symbols cached)", len(_BINGX_INTERVALS))
+        except Exception as exc:
+            logger.warning("[BingX] _bingx_intervals_refresher error: %s", exc)
+        await asyncio.sleep(BINGX_INTERVALS_TTL)
+
+
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
-        # Fetch ticker only (contract/detail does NOT contain funding interval fields)
+        # Fetch ticker only on the critical path.
+        # Intervals come from _MEXC_INTERVALS (background task: contract/detail + per-symbol funding_rate).
         ticker_data = await fetch_json(session, MEXC_TICKERS)
         data = ticker_data
         items = data.get("data") if isinstance(data, dict) else data
@@ -620,6 +720,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                         tick = ft
                     if isinstance(fp, dict) and fp:
                         prem = fp
+                        # Cache interval from per-symbol prem (single-symbol prem has fundingInterval in ms)
+                        ih = _pick_int(prem, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
+                        if ih > 0 and norm_sym not in _BINGX_INTERVALS:
+                            _BINGX_INTERVALS[norm_sym] = ih
 
                 bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
                 ask = _pick_float(book, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
@@ -659,9 +763,13 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["from_bulk"] += 1
 
                 # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
-                # prem (premiumIndex) has no interval field; contract has fundingIntervalHours.
+                # Priority: _BINGX_INTERVALS (background task, per-symbol premiumIndex in ms)
+                # → prem dict (bulk premiumIndex — fundingInterval present in some API versions)
+                # → contract dict (BINGX_CONTRACTS — rarely has interval field)
+                # → default 8h
                 bingx_interval_h = (
-                    _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
+                    _BINGX_INTERVALS.get(norm_sym, 0)
+                    or _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
                     or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingTime", "fundingRateInterval"], default=0)
                     or 8
                 )
@@ -957,7 +1065,8 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 async def lifespan(_: FastAPI):
     await _redis_connect()
     asyncio.create_task(updater_loop())
-    asyncio.create_task(_mexc_intervals_refresher())  # non-blocking MEXC interval refresh
+    asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
+    asyncio.create_task(_bingx_intervals_refresher())  # non-blocking BingX interval refresh
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())
     yield
