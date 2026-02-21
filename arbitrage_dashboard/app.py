@@ -247,6 +247,27 @@ def _pick_ts(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
+def _pick_ts_or_delta(d: dict, keys: List[str]) -> float:
+    """Like _pick_ts but also handles MEXC-style remaining-time deltas.
+
+    MEXC bulk ticker and funding_rate endpoints return ``nextSettleTime``
+    as milliseconds *remaining* until settlement (a delta), not an absolute
+    Unix timestamp.  Values below 86 400 000 ms (1 day) cannot be a valid
+    absolute timestamp in seconds, so they are interpreted as a delta:
+        abs_ts_sec = now + delta_ms / 1000
+    """
+    ts = _pick_ts(d, keys)
+    if math.isfinite(ts):
+        return ts
+    # Try delta-ms interpretation (MEXC nextSettleTime)
+    one_day_ms = 86_400_000.0
+    for key in keys:
+        val = to_float(d.get(key))
+        if math.isfinite(val) and 0 < val < one_day_ms:
+            return time.time() + val / 1000.0
+    return math.nan
+
+
 def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
     for key in keys:
         raw = d.get(key)
@@ -305,7 +326,8 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             if quote.upper() != "USDT":
                 continue
             fund = to_float(it.get("fundingRate"))
-            next_ts = _pick_ts(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
+            # MEXC bulk ticker returns nextSettleTime as a delta in ms (not absolute ts)
+            next_ts = _pick_ts_or_delta(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
             out[normalize_usdt(base)] = MarketRow(
                 exchange="MEXC",
                 bid=to_float(it.get("bid1")),
@@ -1170,13 +1192,11 @@ async def api_funding_next(exchange: str = "", symbol: str = ""):
             d = raw.get("data") if isinstance(raw, dict) else None
             if isinstance(d, dict):
                 ts_raw = d.get("nextSettleTime") or d.get("nextFundingTime")
-                ts_val = to_float(ts_raw)
-                if math.isfinite(ts_val) and ts_val > 0:
-                    ts_ms = int(ts_val) if ts_val > TIMESTAMP_MS_THRESHOLD else int(ts_val * 1000)
-                    if ts_ms > now_ms:
-                        _MEXC_SYM_FUND_CACHE[sym_upper] = {"ts_ms": ts_ms, "at": time.time()}
-                        logger.info("[MEXC] %s: next %s", sym_upper, datetime.fromtimestamp(ts_ms/1000, tz=timezone.utc).isoformat())
-                        return JSONResponse({"nextFundingTime": ts_ms, "exchange": exchange, "symbol": symbol})
+                ts_ms = _mexc_ts_raw_to_ms(ts_raw, now_ms)
+                if ts_ms > now_ms:
+                    _MEXC_SYM_FUND_CACHE[sym_upper] = {"ts_ms": ts_ms, "at": time.time()}
+                    logger.info("[MEXC] %s: next %s", sym_upper, datetime.fromtimestamp(ts_ms/1000, tz=timezone.utc).isoformat())
+                    return JSONResponse({"nextFundingTime": ts_ms, "exchange": exchange, "symbol": symbol})
         except Exception as _e:
             logger.warning("[MEXC] per-symbol funding-next error for %s: %s", sym_upper, _e)
         # Fall through to exchange-level lookup below
@@ -1204,18 +1224,37 @@ async def api_funding_next(exchange: str = "", symbol: str = ""):
                 d = raw.get("data") if isinstance(raw, dict) else None
                 if isinstance(d, dict):
                     ts_raw = d.get("nextSettleTime") or d.get("nextFundingTime")
-                    ts_val = to_float(ts_raw)
-                    if math.isfinite(ts_val) and ts_val > 0:
-                        ts_ms = int(ts_val) if ts_val > TIMESTAMP_MS_THRESHOLD else int(ts_val * 1000)
-                        if ts_ms > now_ms:
-                            _MEXC_FUND_CACHE["ts_ms"] = ts_ms
-                            _MEXC_FUND_CACHE["at"] = time.time()
-                            nearest_funding_ms = ts_ms
-                            logger.info("[MEXC] next funding: %s", datetime.fromtimestamp(ts_ms/1000, tz=timezone.utc).isoformat())
+                    ts_ms = _mexc_ts_raw_to_ms(ts_raw, now_ms)
+                    if ts_ms > now_ms:
+                        _MEXC_FUND_CACHE["ts_ms"] = ts_ms
+                        _MEXC_FUND_CACHE["at"] = time.time()
+                        nearest_funding_ms = ts_ms
+                        logger.info("[MEXC] next funding: %s", datetime.fromtimestamp(ts_ms/1000, tz=timezone.utc).isoformat())
             except Exception as _e:
                 logger.warning("[MEXC] funding-next fallback error: %s", _e)
 
     return JSONResponse({"nextFundingTime": nearest_funding_ms, "exchange": exchange})
+
+
+def _mexc_ts_raw_to_ms(ts_raw: Any, now_ms: int) -> int:
+    """Convert MEXC nextSettleTime/nextFundingTime to an absolute UTC millisecond timestamp.
+
+    MEXC may return either:
+    - An absolute timestamp in milliseconds (> 1e12)
+    - An absolute timestamp in seconds (> 1e9)
+    - A **remaining-time delta in milliseconds** (< 86 400 000 ms = 1 day) ← common case
+    Returns 0 if value is invalid or in the past.
+    """
+    ts_val = to_float(ts_raw)
+    if not math.isfinite(ts_val) or ts_val <= 0:
+        return 0
+    if ts_val > TIMESTAMP_MS_THRESHOLD:
+        ts_ms = int(ts_val)            # already ms timestamp
+    elif ts_val > 1e9:
+        ts_ms = int(ts_val * 1000)     # seconds timestamp → ms
+    else:
+        ts_ms = now_ms + int(ts_val)   # delta in ms → absolute timestamp
+    return ts_ms if ts_ms > now_ms else 0
 
 
 @app.get("/api/data")
@@ -1316,7 +1355,9 @@ async def api_auth_pubkey():
 
 @app.post("/api/auth/register")
 async def api_auth_register(payload: Dict[str, Any]):
-    username, password = _extract_auth_credentials(payload)
+    # RSA decrypt + PBKDF2 hash are CPU-bound (≥200ms). Run in thread pool
+    # so the async event loop is never blocked — table updates keep flowing.
+    username, password = await asyncio.to_thread(_extract_auth_credentials, payload)
 
     if len(username) < 3 or len(password) < 6:
         return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=400)
@@ -1324,7 +1365,7 @@ async def api_auth_register(payload: Dict[str, Any]):
     async with USERS_LOCK:
         if username in USERS:
             return JSONResponse({"ok": False, "error": "user_exists"}, status_code=400)
-        salt, pwh = _make_password_record(password)
+        salt, pwh = await asyncio.to_thread(_make_password_record, password)
         USERS[username] = {
             "username": username,
             "salt": salt,
@@ -1339,10 +1380,13 @@ async def api_auth_register(payload: Dict[str, Any]):
 
 @app.post("/api/auth/login")
 async def api_auth_login(payload: Dict[str, Any]):
-    username, password = _extract_auth_credentials(payload)
+    # RSA decrypt + PBKDF2 verify are CPU-bound (≥200ms). Run in thread pool.
+    username, password = await asyncio.to_thread(_extract_auth_credentials, payload)
 
     user = USERS.get(username)
-    if not user or not _verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
+    if not user or not await asyncio.to_thread(
+        _verify_password, password, user.get("salt", ""), user.get("password_hash", "")
+    ):
         return JSONResponse({"ok": False, "error": "bad_login"}, status_code=401)
 
     token = _make_session(username)
