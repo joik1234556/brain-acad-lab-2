@@ -88,8 +88,11 @@ _MEXC_FUND_CACHE: dict = {"ts_ms": 0, "at": 0.0}
 # Per-symbol MEXC funding time cache  key = symbol e.g. "BTC_USDT"
 _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
 # Per-symbol MEXC funding interval cache  key = symbol e.g. "BTC_USDT" → hours
-# Populated from /api/v1/contract/detail (fetched once per cycle alongside tickers)
+# Populated from /api/v1/contract/funding_rate/{symbol} (fetched lazily once per hour)
 _MEXC_INTERVALS: Dict[str, int] = {}
+# Unix timestamp of last full _MEXC_INTERVALS refresh (refetch when > TTL stale)
+_MEXC_INTERVALS_AT: float = 0.0
+MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
@@ -286,6 +289,22 @@ def _pick_ts_or_delta(d: dict, keys: List[str]) -> float:
     return math.nan
 
 
+def _norm_interval_h(raw_val) -> int:
+    """Normalise a raw funding interval value to hours (int).
+
+    Handles milliseconds (>=3_600_000), seconds (3600..86400), minutes (60..1440),
+    and direct hours (1..24).  Returns 0 for invalid/zero values.
+    """
+    val = to_float(raw_val)
+    if not (math.isfinite(val) and val > 0):
+        return 0
+    if val >= 3_600_000:          # ms  → seconds
+        val = val / 1000.0
+    while val > 24 and val % 60 == 0:   # seconds or minutes → hours
+        val = val / 60.0
+    return max(1, int(round(val)))
+
+
 def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
     for key in keys:
         raw = d.get(key)
@@ -295,20 +314,11 @@ def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
             txt = raw.strip().lower().replace("hours", "h").replace("hour", "h")
             if txt.endswith("h"):
                 txt = txt[:-1]
-            val = to_float(txt)
-        else:
-            val = to_float(raw)
-        if math.isfinite(val) and val > 0:
-            # BingX returns fundingInterval in milliseconds (e.g. 28800000 ms = 8h).
-            # Detect ms values: anything >= 1h expressed in ms (3_600_000).
-            # Divide by 1000 to get seconds, then the while-loop converts s→h.
-            if val >= 3_600_000:
-                val = val / 1000.0
-            while val > 24 and val % 60 == 0:
-                val = val / 60.0
-            return max(1, int(round(val)))
+            raw = txt
+        ih = _norm_interval_h(raw)
+        if ih > 0:
+            return ih
     return default
-
 
 def funding_eta_str(next_ts: float, fallback_hours: int = 8) -> str:
     now = datetime.now(timezone.utc)
@@ -331,43 +341,54 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
         return await response.json(content_type=None)
 
 
+async def _refresh_mexc_intervals(session: aiohttp.ClientSession, symbols: List[str]) -> None:
+    """Fetch collectCycle per MEXC symbol from funding_rate/{sym} endpoint.
+
+    Called at most once per MEXC_INTERVALS_TTL seconds.  Uses a semaphore of 20
+    so all ~200 requests complete in a few seconds without hammering the API.
+    """
+    global _MEXC_INTERVALS, _MEXC_INTERVALS_AT
+    sem = asyncio.Semaphore(20)
+
+    async def _one(sym: str) -> None:
+        async with sem:
+            try:
+                d = await fetch_json(session, f"https://contract.mexc.com/api/v1/contract/funding_rate/{sym}")
+                if isinstance(d, dict) and d.get("success"):
+                    cc = (d.get("data") or {}).get("collectCycle", 0)
+                    ih = _norm_interval_h(cc)
+                    if ih > 0:
+                        _MEXC_INTERVALS[sym] = ih
+            except Exception as exc:
+                logger.debug("[MEXC] funding_rate/%s failed: %s", sym, exc)
+
+    await asyncio.gather(*[_one(s) for s in symbols])
+    _MEXC_INTERVALS_AT = time.time()
+
+
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
-        # Fetch tickers and contract details in parallel — details contain settleTime (funding interval)
-        ticker_fut = fetch_json(session, MEXC_TICKERS)
-        detail_fut = fetch_json(session, MEXC_CONTRACT_DETAIL)
-        ticker_data, detail_data = await asyncio.gather(ticker_fut, detail_fut, return_exceptions=True)
-
-        # Build symbol → interval_h from contract detail (settleTime is in seconds: 3600=1h, 14400=4h, 28800=8h)
-        # _pick_int handles s→h via its while-loop: 28800→480→8, 14400→240→4, 3600→60→1
-        if isinstance(detail_data, Exception):
-            logger.warning("MEXC contract/detail fetch failed (intervals defaulting to 8h): %s", detail_data)
-        elif isinstance(detail_data, dict):
-            detail_items = detail_data.get("data") or []
-            if isinstance(detail_items, list):
-                for d in detail_items:
-                    if not isinstance(d, dict):
-                        continue
-                    dsym = str(d.get("symbol") or "")
-                    ih = _pick_int(
-                        d,
-                        # MEXC contract/detail field names vary across API versions;
-                        # try all known candidates (hours or seconds — _pick_int normalises).
-                        ["settlePeriod", "settleTime", "fundingRateInterval",
-                         "fundingIntervalHours", "fundingInterval",
-                         "settleCycle", "collectCycle"],
-                        default=0,
-                    )
-                    if dsym and ih > 0:
-                        _MEXC_INTERVALS[dsym] = ih
-
-        if isinstance(ticker_data, Exception):
-            raise ticker_data
+        # Fetch ticker only (contract/detail does NOT contain funding interval fields)
+        ticker_data = await fetch_json(session, MEXC_TICKERS)
         data = ticker_data
         items = data.get("data") if isinstance(data, dict) else data
         if not isinstance(items, list):
             return out
+
+        # Collect all MEXC USDT-perpetual symbols
+        all_syms = [
+            str(it.get("symbol") or "")
+            for it in items
+            if isinstance(it, dict) and "_" in str(it.get("symbol") or "")
+            and str(it.get("symbol") or "").split("_", 1)[1].upper() == "USDT"
+        ]
+
+        # Refresh per-symbol funding intervals once per hour.
+        # funding_rate/{sym} returns collectCycle (hours) — the ONLY reliable MEXC source.
+        if time.time() - _MEXC_INTERVALS_AT > MEXC_INTERVALS_TTL:
+            await _refresh_mexc_intervals(session, all_syms)
+            logger.info("[MEXC] refreshed funding intervals for %d symbols", len(all_syms))
 
         for it in items:
             if not isinstance(it, dict):
@@ -381,9 +402,9 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund = to_float(it.get("fundingRate"))
             # MEXC bulk ticker returns nextSettleTime as a delta in ms (not absolute ts)
             next_ts = _pick_ts_or_delta(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
-            # Use per-symbol interval from contract/detail (all known field names tried above);
-            # MEXC bulk ticker does NOT include collectCycle, so ticker fallback rarely helps,
-            # but we still try in case MEXC adds the field in a future API update.
+            # Priority: _MEXC_INTERVALS (from funding_rate/{sym}, updated hourly)
+            # → collectCycle in ticker row (available in some future API update)
+            # → hardcoded 8h default
             interval_h = (
                 _MEXC_INTERVALS.get(symbol)
                 or _pick_int(
@@ -614,11 +635,11 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     url=bingx_trade_url(raw),
                     next_funding_ts=next_ts,
                     funding_interval_h=(
-                        # prem if prem else contract never reaches contract when prem is non-empty.
-                        # Try prem first (may have fundingIntervalHours), then contract (may have
-                        # settleCycle), then fall back to 8h (BingX standard perpetual interval).
+                        # Try prem first (fundingIntervalHours or fundingInterval in hours/ms),
+                        # then contract (fundingInterval in hours OR fundingTime in minutes).
+                        # Fall back to 8h (BingX standard perpetual interval).
                         _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
-                        or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingRateInterval"], default=0)
+                        or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingTime", "fundingRateInterval"], default=0)
                         or 8
                     ),
                 )
