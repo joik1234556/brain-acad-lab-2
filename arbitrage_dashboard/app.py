@@ -71,6 +71,7 @@ MAX_FREE_SPREAD = 0.02
 SESSION_TTL_SEC = 7 * 24 * 3600
 
 MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
+MEXC_CONTRACT_DETAIL = "https://contract.mexc.com/api/v1/contract/detail"
 MEXC_FUNDING_RATE_BTC = "https://contract.mexc.com/api/v1/contract/funding_rate/BTC_USDT"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
 BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
@@ -85,6 +86,9 @@ MEXC_FUNDING_CACHE_TTL_SEC = 60
 _MEXC_FUND_CACHE: dict = {"ts_ms": 0, "at": 0.0}
 # Per-symbol MEXC funding time cache  key = symbol e.g. "BTC_USDT"
 _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
+# Per-symbol MEXC funding interval cache  key = symbol e.g. "BTC_USDT" → hours
+# Populated from /api/v1/contract/detail (fetched once per cycle alongside tickers)
+_MEXC_INTERVALS: Dict[str, int] = {}
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -321,7 +325,29 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
-        data = await fetch_json(session, MEXC_TICKERS)
+        # Fetch tickers and contract details in parallel — details contain settleTime (funding interval)
+        ticker_fut = fetch_json(session, MEXC_TICKERS)
+        detail_fut = fetch_json(session, MEXC_CONTRACT_DETAIL)
+        ticker_data, detail_data = await asyncio.gather(ticker_fut, detail_fut, return_exceptions=True)
+
+        # Build symbol → interval_h from contract detail (settleTime is in seconds: 3600=1h, 14400=4h, 28800=8h)
+        # _pick_int handles s→h via its while-loop: 28800→480→8, 14400→240→4, 3600→60→1
+        if isinstance(detail_data, Exception):
+            logger.warning("MEXC contract/detail fetch failed (intervals defaulting to 8h): %s", detail_data)
+        elif isinstance(detail_data, dict):
+            detail_items = detail_data.get("data") or []
+            if isinstance(detail_items, list):
+                for d in detail_items:
+                    if not isinstance(d, dict):
+                        continue
+                    dsym = str(d.get("symbol") or "")
+                    ih = _pick_int(d, ["settleTime", "settleCycle", "fundingInterval", "collectCycle"], default=8)
+                    if dsym:
+                        _MEXC_INTERVALS[dsym] = ih
+
+        if isinstance(ticker_data, Exception):
+            raise ticker_data
+        data = ticker_data
         items = data.get("data") if isinstance(data, dict) else data
         if not isinstance(items, list):
             return out
@@ -338,6 +364,10 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund = to_float(it.get("fundingRate"))
             # MEXC bulk ticker returns nextSettleTime as a delta in ms (not absolute ts)
             next_ts = _pick_ts_or_delta(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
+            # Use per-symbol interval from contract/detail; fall back to ticker field then 8h
+            interval_h = _MEXC_INTERVALS.get(symbol) or _pick_int(
+                it, ["fundingInterval", "settleInterval", "collectCycle"], default=8
+            )
             out[normalize_usdt(base)] = MarketRow(
                 exchange="MEXC",
                 bid=to_float(it.get("bid1")),
@@ -345,10 +375,10 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
                 last=to_float(it.get("lastPrice")),
                 vol24_usd=to_float(it.get("amount24")),
                 fund_rate=fund,
-                fund24_est=funding_24h_estimate(fund),
+                fund24_est=funding_24h_estimate(fund, interval_h),
                 url=mexc_trade_url(symbol),
                 next_funding_ts=next_ts,
-                funding_interval_h=_pick_int(it, ["fundingInterval", "settleInterval", "collectCycle"], default=8),
+                funding_interval_h=interval_h,
             )
     except Exception as e:
         logger.error("MEXC load error: %s: %s", type(e).__name__, e)
