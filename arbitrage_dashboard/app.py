@@ -364,9 +364,11 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund = to_float(it.get("fundingRate"))
             # MEXC bulk ticker returns nextSettleTime as a delta in ms (not absolute ts)
             next_ts = _pick_ts_or_delta(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
-            # Use per-symbol interval from contract/detail; fall back to ticker field then 8h
-            interval_h = _MEXC_INTERVALS.get(symbol) or _pick_int(
-                it, ["fundingInterval", "settleInterval", "collectCycle"], default=8
+            # Use per-symbol interval from contract/detail; fall back to ticker collectCycle (hours) then 8h
+            interval_h = (
+                _MEXC_INTERVALS.get(symbol)
+                or _pick_int(it, ["collectCycle", "fundingInterval", "settleInterval", "settleCycle"], default=0)
+                or 8
             )
             out[normalize_usdt(base)] = MarketRow(
                 exchange="MEXC",
@@ -561,10 +563,13 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     fund24_est=funding_24h_estimate(fund),
                     url=bingx_trade_url(raw),
                     next_funding_ts=next_ts,
-                    funding_interval_h=_pick_int(
-                        prem if prem else contract,
-                        ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"],
-                        default=8,
+                    funding_interval_h=(
+                        # prem if prem else contract never reaches contract when prem is non-empty.
+                        # Try prem first (may have fundingIntervalHours), then contract (may have
+                        # settleCycle), then fall back to 8h (BingX standard perpetual interval).
+                        _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
+                        or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingRateInterval"], default=0)
+                        or 8
                     ),
                 )
                 if on_symbol is not None:
