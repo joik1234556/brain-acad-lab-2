@@ -100,10 +100,8 @@ MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refres
 # Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
 _BYBIT_INTERVALS: Dict[str, int] = {}
 # Per-symbol BingX funding interval cache, key = norm_sym e.g. "BTCUSDT" → hours.
-# Populated by _bingx_intervals_refresher() background task (bulk prem first, per-symbol fallback).
+# Populated by _infer_bingx_interval_h() during load_bingx (no extra API calls needed).
 _BINGX_INTERVALS: Dict[str, int] = {}
-_BINGX_INTERVALS_AT: float = 0.0
-BINGX_INTERVALS_TTL = 3600  # seconds; refresh hourly
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -337,6 +335,29 @@ def _pick_int(d: dict, keys: List[str], default: int = 8) -> int:
             return ih
     return default
 
+def _infer_bingx_interval_h(next_ts: float) -> int:
+    """Infer BingX funding interval from nextFundingTime UTC alignment.
+
+    BingX schedules funding payments at fixed UTC boundaries:
+      - 8h cycle: 00:00, 08:00, 16:00 UTC  (ts_sec divisible by 8*3600 = 28800)
+      - 4h cycle: +04:00, +12:00, +20:00 UTC (ts_sec divisible by 4*3600 = 14400)
+      - 1h cycle: every hour               (ts_sec divisible by 3600)
+
+    Check from LARGEST to SMALLEST so that 00:00/08:00/16:00 (which divide by
+    all three) are correctly identified as 8h, not 4h or 1h.
+
+    No extra API call needed — nextFundingTime is already in the premiumIndex
+    response.  Returns 8 when next_ts is unavailable (safe default for BingX).
+    """
+    if not (math.isfinite(next_ts) and next_ts > 0):
+        return 8
+    ts_sec = int(next_ts)  # already in seconds (after _pick_ts conversion)
+    for h in (8, 4, 1):   # largest first so 8h boundaries aren't misclassified as 4h/1h
+        if ts_sec % (h * 3600) == 0:
+            return h
+    return 8
+
+
 def funding_eta_str(next_ts: float, fallback_hours: int = 8) -> str:
     now = datetime.now(timezone.utc)
     if math.isfinite(next_ts) and next_ts > time.time():
@@ -441,73 +462,6 @@ async def _mexc_intervals_refresher() -> None:
         except Exception as exc:
             logger.warning("[MEXC] _mexc_intervals_refresher error: %s", exc)
         await asyncio.sleep(MEXC_INTERVALS_TTL)
-
-
-async def _bingx_intervals_refresher() -> None:
-    """Background task: refresh BingX per-symbol funding intervals once per hour.
-
-    Strategy:
-    1. Fetch bulk BINGX_PREMIUM_INDEX (free, no extra API calls) and check for
-       ``fundingInterval`` field (present in some BingX API versions, in ms).
-    2. For any symbol where bulk prem has no interval, fetch single-symbol
-       premiumIndex (has ``fundingInterval`` in ms reliably).
-    Populates _BINGX_INTERVALS[norm_sym] = hours.
-    """
-    global _BINGX_INTERVALS, _BINGX_INTERVALS_AT
-    await asyncio.sleep(4)  # short initial delay so app finishes booting first
-    while True:
-        try:
-            timeout = aiohttp.ClientTimeout(total=INTERVAL_FETCH_TIMEOUT * 8)
-            async with aiohttp.ClientSession(timeout=timeout) as bg_session:
-                # Step 1: bulk premiumIndex (one call — some BingX API versions include fundingInterval)
-                prem_data = await fetch_json(bg_session, BINGX_PREMIUM_INDEX)
-                prem_items = _as_list(prem_data)
-                missing_raws: list = []
-                for item in prem_items:
-                    raw = str(item.get("symbol") or "")
-                    if not raw or "-" not in raw:
-                        continue
-                    base, quote = raw.split("-", 1)
-                    if quote.upper() != "USDT":
-                        continue
-                    norm = normalize_usdt(base)
-                    ih = _pick_int(item, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
-                    if ih > 0:
-                        _BINGX_INTERVALS[norm] = ih
-                    else:
-                        missing_raws.append((norm, raw))
-
-                # Step 2: per-symbol premiumIndex for symbols not covered by bulk
-                sem = asyncio.Semaphore(10)
-
-                async def _fetch_bingx_one(norm: str, raw: str) -> None:
-                    async with sem:
-                        try:
-                            resp = await fetch_json(
-                                bg_session, BINGX_PREMIUM_INDEX,
-                                params={"symbol": raw},
-                            )
-                            # Single-symbol response may be wrapped in data dict or list
-                            if isinstance(resp, dict):
-                                item = resp.get("data") or resp
-                                if isinstance(item, list) and item:
-                                    item = item[0]
-                            elif isinstance(resp, list) and resp:
-                                item = resp[0]
-                            else:
-                                item = {}
-                            ih = _pick_int(item, ["fundingInterval", "fundingIntervalHours", "fundingRateInterval"], default=0)
-                            if ih > 0:
-                                _BINGX_INTERVALS[norm] = ih
-                        except Exception as exc:
-                            logger.debug("[BingX] interval fetch %s failed: %s", raw, exc)
-
-                await asyncio.gather(*[_fetch_bingx_one(n, r) for n, r in missing_raws])
-                _BINGX_INTERVALS_AT = time.time()
-                logger.info("[BingX] interval refresh done (%d symbols cached)", len(_BINGX_INTERVALS))
-        except Exception as exc:
-            logger.warning("[BingX] _bingx_intervals_refresher error: %s", exc)
-        await asyncio.sleep(BINGX_INTERVALS_TTL)
 
 
 async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
@@ -763,16 +717,17 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["from_bulk"] += 1
 
                 # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
-                # Priority: _BINGX_INTERVALS (background task, per-symbol premiumIndex in ms)
-                # → prem dict (bulk premiumIndex — fundingInterval present in some API versions)
-                # → contract dict (BINGX_CONTRACTS — rarely has interval field)
-                # → default 8h
-                bingx_interval_h = (
-                    _BINGX_INTERVALS.get(norm_sym, 0)
-                    or _pick_int(prem, ["fundingIntervalHours", "fundingIntervalHour", "fundingInterval", "fundingRateInterval"], default=0)
-                    or _pick_int(contract, ["settleCycle", "fundingIntervalHours", "fundingInterval", "fundingTime", "fundingRateInterval"], default=0)
-                    or 8
-                )
+                # Priority 1: cache from previous cycle (avoids re-inference every render)
+                # Priority 2: infer from nextFundingTime UTC alignment — BingX schedules
+                #   funding at fixed UTC boundaries (e.g. 00:00/08:00/16:00 for 8h), so
+                #   ts_sec % (h*3600) == 0 reliably identifies the cycle.  No extra API
+                #   call needed — nextFundingTime is already in the premiumIndex response.
+                # Priority 3: default 8h (correct for all known BingX USDT perpetuals)
+                bingx_interval_h = _BINGX_INTERVALS.get(norm_sym, 0)
+                if not bingx_interval_h:
+                    bingx_interval_h = _infer_bingx_interval_h(next_ts)
+                    if bingx_interval_h:
+                        _BINGX_INTERVALS[norm_sym] = bingx_interval_h  # write-through cache
 
                 market_row = MarketRow(
                     exchange="BingX",
@@ -1066,7 +1021,7 @@ async def lifespan(_: FastAPI):
     await _redis_connect()
     asyncio.create_task(updater_loop())
     asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
-    asyncio.create_task(_bingx_intervals_refresher())  # non-blocking BingX interval refresh
+    # BingX intervals are inferred from nextFundingTime alignment in load_bingx() — no background task needed
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())
     yield
