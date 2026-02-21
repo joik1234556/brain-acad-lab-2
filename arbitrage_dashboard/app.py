@@ -433,7 +433,9 @@ async def _mexc_intervals_refresher() -> None:
             # sock_connect + sock_read per operation; no total session deadline
             timeout = aiohttp.ClientTimeout(sock_connect=5, sock_read=15)
             async with aiohttp.ClientSession(timeout=timeout) as bg_session:
-                # Step 1: fast bulk init from contract/detail (fundingInterval in seconds)
+                # Step 1: fast bulk init from contract/detail.
+                # MEXC contract detail has 'settlePeriod' (hours) for each symbol.
+                # Also try all known field name variants for forward-compatibility.
                 detail_found = 0
                 try:
                     detail_data = await fetch_json(bg_session, MEXC_CONTRACT_DETAIL)
@@ -441,13 +443,20 @@ async def _mexc_intervals_refresher() -> None:
                         sym = str(c.get("symbol") or "")
                         if not sym:
                             continue
-                        ih = _norm_interval_h(c.get("fundingInterval", 0))
+                        ih = _pick_int(
+                            c,
+                            ["settlePeriod", "fundingInterval", "collectCycle",
+                             "settleTime", "settleCycle", "fundingRateInterval"],
+                            default=0,
+                        )
                         if ih > 0:
                             _MEXC_INTERVALS[sym] = ih
                             detail_found += 1
                     if detail_found:
                         _MEXC_INTERVALS_AT = time.time()
                         logger.info("[MEXC] %d intervals from contract/detail", detail_found)
+                    else:
+                        logger.warning("[MEXC] contract/detail returned 0 interval fields")
                 except Exception as exc:
                     logger.warning("[MEXC] contract/detail fetch failed: %s", exc)
 
@@ -622,6 +631,25 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
 
         sem = asyncio.Semaphore(BINGX_CONCURRENCY)
         dbg["selected"] = len(selected)
+
+        # Pre-populate _BINGX_INTERVALS from contracts (already fetched, zero extra cost).
+        # BINGX_CONTRACTS has 'fundingIntervalHours' for each symbol.
+        for raw_sym, c in contract_by_raw.items():
+            ih = _pick_int(c, ["fundingIntervalHours", "fundingInterval", "fundingTime", "settleCycle"], default=0)
+            if ih <= 0:
+                continue
+            if "-" in raw_sym:
+                base, quote = raw_sym.split("-", 1)
+                if quote.upper() != "USDT":
+                    continue
+                norm = normalize_usdt(base)
+            elif raw_sym.upper().endswith("USDT"):
+                norm = raw_sym.upper()
+            else:
+                continue
+            if norm and norm not in _BINGX_INTERVALS:
+                _BINGX_INTERVALS[norm] = ih
+
         bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
             fetch_json(session, BINGX_BOOK_TICKER),
             fetch_json(session, BINGX_TICKER_24H),
@@ -725,17 +753,19 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["from_bulk"] += 1
 
                 # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
-                # Priority 1: cache from previous cycle (avoids re-inference every render)
-                # Priority 2: infer from nextFundingTime UTC alignment — BingX schedules
-                #   funding at fixed UTC boundaries (e.g. 00:00/08:00/16:00 for 8h), so
-                #   ts_sec % (h*3600) == 0 reliably identifies the cycle.  No extra API
-                #   call needed — nextFundingTime is already in the premiumIndex response.
-                # Priority 3: default 8h (correct for all known BingX USDT perpetuals)
-                bingx_interval_h = _BINGX_INTERVALS.get(norm_sym, 0)
+                # Priority 1: _BINGX_INTERVALS (pre-populated from BINGX_CONTRACTS which
+                #   has fundingIntervalHours; also cached from previous cycles)
+                # Priority 2: contract dict inline (same source, belt-and-suspenders)
+                # Priority 3: infer from nextFundingTime UTC alignment
+                # Priority 4: default 8h
+                bingx_interval_h = (
+                    _BINGX_INTERVALS.get(norm_sym, 0)
+                    or _pick_int(contract, ["fundingIntervalHours", "fundingInterval", "fundingTime", "settleCycle"], default=0)
+                )
                 if not bingx_interval_h:
                     bingx_interval_h = _infer_bingx_interval_h(next_ts)
-                    if bingx_interval_h:
-                        _BINGX_INTERVALS[norm_sym] = bingx_interval_h  # write-through cache
+                if bingx_interval_h and norm_sym not in _BINGX_INTERVALS:
+                    _BINGX_INTERVALS[norm_sym] = bingx_interval_h  # write-through cache
 
                 market_row = MarketRow(
                     exchange="BingX",
