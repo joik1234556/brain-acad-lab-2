@@ -74,6 +74,7 @@ MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
 MEXC_CONTRACT_DETAIL = "https://contract.mexc.com/api/v1/contract/detail"
 MEXC_FUNDING_RATE_BTC = "https://contract.mexc.com/api/v1/contract/funding_rate/BTC_USDT"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
+BYBIT_INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info"
 BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 BINGX_BOOK_TICKER = "https://open-api.bingx.com/openApi/swap/v2/quote/bookTicker"
 BINGX_TICKER_24H = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
@@ -89,6 +90,9 @@ _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
 # Per-symbol MEXC funding interval cache  key = symbol e.g. "BTC_USDT" → hours
 # Populated from /api/v1/contract/detail (fetched once per cycle alongside tickers)
 _MEXC_INTERVALS: Dict[str, int] = {}
+# Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
+# Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
+_BYBIT_INTERVALS: Dict[str, int] = {}
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -346,8 +350,16 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
                     if not isinstance(d, dict):
                         continue
                     dsym = str(d.get("symbol") or "")
-                    ih = _pick_int(d, ["settleTime", "settleCycle", "fundingInterval", "collectCycle"], default=8)
-                    if dsym:
+                    ih = _pick_int(
+                        d,
+                        # MEXC contract/detail field names vary across API versions;
+                        # try all known candidates (hours or seconds — _pick_int normalises).
+                        ["settlePeriod", "settleTime", "fundingRateInterval",
+                         "fundingIntervalHours", "fundingInterval",
+                         "settleCycle", "collectCycle"],
+                        default=0,
+                    )
+                    if dsym and ih > 0:
                         _MEXC_INTERVALS[dsym] = ih
 
         if isinstance(ticker_data, Exception):
@@ -369,10 +381,17 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
             fund = to_float(it.get("fundingRate"))
             # MEXC bulk ticker returns nextSettleTime as a delta in ms (not absolute ts)
             next_ts = _pick_ts_or_delta(it, ["nextFundingTime", "nextSettleTime", "fundingTime"])
-            # Use per-symbol interval from contract/detail; fall back to ticker collectCycle (hours) then 8h
+            # Use per-symbol interval from contract/detail (all known field names tried above);
+            # MEXC bulk ticker does NOT include collectCycle, so ticker fallback rarely helps,
+            # but we still try in case MEXC adds the field in a future API update.
             interval_h = (
                 _MEXC_INTERVALS.get(symbol)
-                or _pick_int(it, ["collectCycle", "fundingInterval", "settleInterval", "settleCycle"], default=0)
+                or _pick_int(
+                    it,
+                    ["collectCycle", "fundingInterval", "settlePeriod",
+                     "fundingRateInterval", "settleInterval", "settleCycle"],
+                    default=0,
+                )
                 or 8
             )
             out[normalize_usdt(base)] = MarketRow(
@@ -396,8 +415,32 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
 async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
     out: Dict[str, MarketRow] = {}
     try:
-        data = await fetch_json(session, BYBIT_TICKERS, params={"category": "linear"})
-        items = data.get("result", {}).get("list", []) if isinstance(data, dict) else []
+        # Fetch tickers + instruments-info in parallel.
+        # instruments-info has fundingInterval (minutes) which tickers do NOT include.
+        ticker_fut = fetch_json(session, BYBIT_TICKERS, params={"category": "linear"})
+        inst_fut = fetch_json(session, BYBIT_INSTRUMENTS, params={"category": "linear"})
+        ticker_data, inst_data = await asyncio.gather(ticker_fut, inst_fut, return_exceptions=True)
+
+        # Build symbol → interval_h from instruments-info.
+        # fundingInterval is in MINUTES (e.g. 480 = 8h, 240 = 4h, 60 = 1h).
+        # _pick_int while-loop divides by 60 while val > 24 and divisible by 60:
+        # 480 → 8h, 240 → 4h, 60 → 1h.
+        if isinstance(inst_data, Exception):
+            logger.warning("Bybit instruments-info fetch failed (intervals defaulting to 8h): %s", inst_data)
+        elif isinstance(inst_data, dict):
+            inst_items = inst_data.get("result", {}).get("list", [])
+            if isinstance(inst_items, list):
+                for d in inst_items:
+                    if not isinstance(d, dict):
+                        continue
+                    isym = str(d.get("symbol") or "").upper()
+                    ih = _pick_int(d, ["fundingInterval", "fundingIntervalHour", "fundingIntervalHours"], default=0)
+                    if isym and ih > 0:
+                        _BYBIT_INTERVALS[isym] = ih
+
+        if isinstance(ticker_data, Exception):
+            raise ticker_data
+        items = ticker_data.get("result", {}).get("list", []) if isinstance(ticker_data, dict) else []
         if not isinstance(items, list):
             return out
 
@@ -409,6 +452,8 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
                 continue
             fund = to_float(it.get("fundingRate"))
             next_ts = _pick_ts(it, ["nextFundingTime", "nextFundingTimestamp"])
+            # Use per-symbol interval from instruments-info; ticker has no interval field.
+            interval_h = _BYBIT_INTERVALS.get(symbol, 0) or 8
             out[symbol] = MarketRow(
                 exchange="Bybit",
                 bid=to_float(it.get("bid1Price") or it.get("bidPrice")),
@@ -416,10 +461,10 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
                 last=to_float(it.get("lastPrice")),
                 vol24_usd=to_float(it.get("turnover24h") or it.get("turnover24H") or it.get("volume24h")),
                 fund_rate=fund,
-                fund24_est=funding_24h_estimate(fund),
+                fund24_est=funding_24h_estimate(fund, interval_h),
                 url=bybit_trade_url(symbol),
                 next_funding_ts=next_ts,
-                funding_interval_h=_pick_int(it, ["fundingIntervalHour", "fundingInterval", "fundingIntervalHours"], default=8),
+                funding_interval_h=interval_h,
             )
     except Exception as e:
         logger.error("Bybit load error: %s: %s", type(e).__name__, e)
