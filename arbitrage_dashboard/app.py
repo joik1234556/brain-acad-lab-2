@@ -1022,10 +1022,14 @@ async def _push_pairs_to_live_rows(
 
     Redis sync is done once at the end of compute_once via _rlive_set_batch
     (a single pipeline call) rather than N individual hset calls here.
+    Yields to the event loop every 20 symbols so login/logout/SSE requests
+    are never blocked for more than ~20ms at a time.
     """
     if symbols is None:
         symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
-    for symbol in symbols:
+    for i, symbol in enumerate(symbols):
+        if i % 20 == 0:
+            await asyncio.sleep(0)  # yield to event loop every 20 symbols
         market_rows = [r for r in (mexc.get(symbol), bybit.get(symbol), bingx.get(symbol)) if r is not None]
         if len(market_rows) < 2:
             continue
@@ -1578,14 +1582,11 @@ async def compute_once() -> Dict[str, Any]:
 
         sorted_candidates = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
 
-        # Phase 2: BingX – update LIVE_ROWS per coin as each symbol's data arrives.
-        # No intermediate SSE broadcasts here — updater_loop broadcasts once after
-        # the whole cycle completes. Intermediate broadcasts would cause all connected
-        # clients to call /api/data ~8 times per cycle for no benefit.
-        async def on_bingx_symbol(norm_sym: str, bingx_row: MarketRow) -> None:
-            await _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
-
-        bingx = await load_bingx(session, sorted_candidates, on_symbol=on_bingx_symbol) if enabled.get("BingX", True) else {}
+        # Phase 2: BingX – load all symbols concurrently.
+        # on_symbol callback removed: it called best_pairs() 260 times (~1300ms CPU)
+        # with no SSE broadcast between calls, so clients never saw intermediate updates.
+        # LIVE_ROWS is updated once in the final _rlive_set_batch call below.
+        bingx = await load_bingx(session, sorted_candidates) if enabled.get("BingX", True) else {}
     finally:
         if _owned:
             await session.close()
@@ -1593,7 +1594,9 @@ async def compute_once() -> Dict[str, Any]:
     rows_out: List[dict] = []
     all_symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
 
-    for symbol in all_symbols:
+    for i, symbol in enumerate(all_symbols):
+        if i % 20 == 0:
+            await asyncio.sleep(0)  # yield to event loop every 20 symbols
         rows = [r for r in (mexc.get(symbol), bybit.get(symbol), bingx.get(symbol)) if r]
         if len(rows) < 2:
             continue
