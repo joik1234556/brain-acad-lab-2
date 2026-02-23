@@ -20,6 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger("arb_dashboard")
 
 import aiohttp
+import httpx
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -72,6 +73,10 @@ BINGX_CONCURRENCY = 18
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
 MAX_FREE_SPREAD = 0.02
 SESSION_TTL_SEC = 7 * 24 * 3600
+# Telegram bot integration — token must be set via TELEGRAM_BOT_TOKEN env var (never in source)
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "arbitrageinsights_bot").lstrip("@")
+_TG_API = "https://api.telegram.org/bot{token}/{method}"
 
 MEXC_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
 MEXC_CONTRACT_DETAIL = "https://contract.mexc.com/api/v1/contract/detail"
@@ -135,6 +140,46 @@ def _verify_password(password: str, salt_b64: str, expected_hash: str) -> bool:
 
 def _normalize_username(username: str) -> str:
     return "".join(ch for ch in (username or "").strip().lower() if ch.isalnum() or ch in "._-")[:32]
+
+
+def _normalize_tg_username(raw: str) -> str:
+    """Strip @ prefix, lowercase, allow alphanumeric + underscore, max 32 chars."""
+    stripped = (raw or "").strip().lstrip("@")
+    return "".join(ch for ch in stripped.lower() if ch.isalnum() or ch == "_")[:32]
+
+
+async def _tg_send(chat_id: int | str, text: str) -> bool:
+    """Send a Telegram message via Bot API. Returns True on success."""
+    if not TELEGRAM_BOT_TOKEN:
+        logger.debug("TELEGRAM_BOT_TOKEN not set — skipping tg_send")
+        return False
+    url = _TG_API.format(token=TELEGRAM_BOT_TOKEN, method="sendMessage")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            if resp.status_code != 200:
+                logger.warning("tg_send failed: status=%s body=%s", resp.status_code, resp.text[:200])
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("tg_send exception: %s", exc)
+        return False
+
+
+async def _tg_resolve_chat_id(tg_username: str) -> Optional[int]:
+    """Ask Telegram to resolve @username → chat_id. Returns None on failure."""
+    if not TELEGRAM_BOT_TOKEN or not tg_username:
+        return None
+    url = _TG_API.format(token=TELEGRAM_BOT_TOKEN, method="getChat")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(url, json={"chat_id": f"@{tg_username}"})
+            data = resp.json()
+            if data.get("ok"):
+                return int(data["result"]["id"])
+    except Exception as exc:
+        logger.debug("tg_resolve_chat_id(%s) failed: %s", tg_username, exc)
+    return None
 
 
 def ensure_assets() -> None:
@@ -1017,9 +1062,10 @@ def _decrypt_client_field(value: str) -> str:
     return plain.decode("utf-8")
 
 
-def _extract_auth_credentials(payload: Dict[str, Any]) -> Tuple[str, str]:
+def _extract_auth_credentials(payload: Dict[str, Any]) -> Tuple[str, str, str]:
     plain_username = _normalize_username(str(payload.get("username") or ""))
     plain_password = str(payload.get("password") or "")
+    tg_username = _normalize_tg_username(str(payload.get("tg_username") or ""))
 
     dec_username = ""
     dec_password = ""
@@ -1036,12 +1082,13 @@ def _extract_auth_credentials(payload: Dict[str, Any]) -> Tuple[str, str]:
 
     username = dec_username or plain_username
     password = dec_password or plain_password
-    return username, password
+    return username, password, tg_username
 
 
 USERS = _load_users()
 USERS_LOCK = asyncio.Lock()
 SESSIONS: Dict[str, Dict[str, Any]] = {}
+_BOT_CHECK_RL: Dict[str, int] = {}  # IP-based rate limit counters for /api/bot/check-subscription
 
 
 def _make_session(username: str) -> str:
@@ -1694,7 +1741,7 @@ async def api_auth_pubkey():
 async def api_auth_register(payload: Dict[str, Any]):
     # RSA decrypt + PBKDF2 hash are CPU-bound (≥200ms). Run in thread pool
     # so the async event loop is never blocked — table updates keep flowing.
-    username, password = await asyncio.to_thread(_extract_auth_credentials, payload)
+    username, password, tg_username = await asyncio.to_thread(_extract_auth_credentials, payload)
 
     if len(username) < 3 or len(password) < 6:
         return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=400)
@@ -1709,16 +1756,34 @@ async def api_auth_register(payload: Dict[str, Any]):
             "password_hash": pwh,
             "is_admin": False,
             "subscription_approved": False,
+            "tg_username": tg_username,
+            "tg_chat_id": None,
             "created_at": int(time.time()),
         }
         _save_users(USERS)
+
+    # Resolve Telegram chat_id in background (non-blocking)
+    if tg_username:
+        asyncio.create_task(_resolve_and_store_tg_chat_id(username, tg_username))
+
     return JSONResponse({"ok": True})
+
+
+async def _resolve_and_store_tg_chat_id(username: str, tg_username: str) -> None:
+    """Background task: resolve @username → chat_id and store in USERS."""
+    chat_id = await _tg_resolve_chat_id(tg_username)
+    if chat_id is not None:
+        async with USERS_LOCK:
+            if username in USERS:
+                USERS[username]["tg_chat_id"] = chat_id
+                _save_users(USERS)
+        logger.info("Resolved Telegram chat_id=%s for user=%s (@%s)", chat_id, username, tg_username)
 
 
 @app.post("/api/auth/login")
 async def api_auth_login(payload: Dict[str, Any]):
     # RSA decrypt + PBKDF2 verify are CPU-bound (≥200ms). Run in thread pool.
-    username, password = await asyncio.to_thread(_extract_auth_credentials, payload)
+    username, password, _tg = await asyncio.to_thread(_extract_auth_credentials, payload)
 
     user = USERS.get(username)
     if not user or not await asyncio.to_thread(
@@ -1776,6 +1841,8 @@ async def api_admin_users(request: Request):
             "username": u.get("username"),
             "is_admin": bool(u.get("is_admin")),
             "subscription_approved": bool(u.get("subscription_approved")),
+            "tg_username": u.get("tg_username") or "",
+            "tg_chat_id": u.get("tg_chat_id"),
             "created_at": u.get("created_at"),
         })
     items.sort(key=lambda x: (not x["is_admin"], x["username"]))
@@ -1796,7 +1863,66 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
     async with USERS_LOCK:
         USERS[username]["subscription_approved"] = approved
         _save_users(USERS)
+
+    # Notify user via Telegram bot (non-blocking background task)
+    chat_id = USERS[username].get("tg_chat_id")
+    tg_user = USERS[username].get("tg_username") or ""
+    if chat_id or tg_user:
+        msg = (
+            f"✅ <b>Подписка активирована!</b>\nТеперь вы можете видеть все спреды на сайте.\n🤖 Бот @{TELEGRAM_BOT_USERNAME} активен для вашего аккаунта."
+            if approved else
+            f"❌ <b>Подписка отключена.</b>\nДоступ ограничен до спредов ≤2%.\n🤖 Бот @{TELEGRAM_BOT_USERNAME} приостановлен."
+        )
+        target = chat_id or f"@{tg_user}"
+        asyncio.create_task(_tg_send(target, msg))
+
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/bot/check-subscription")
+async def api_bot_check_subscription(request: Request):
+    """
+    Bot integration endpoint — lets the Telegram bot check if a user has an active subscription.
+    Query: ?tg_username=johndoe  OR  ?chat_id=123456789
+    Returns: {"ok": true, "approved": true/false, "username": "site_login"}
+    Rate-limited: max 120 requests per minute per IP to prevent abuse.
+    """
+    # Simple IP-based rate limit: max 120 calls/minute per IP
+    client_ip = request.client.host if request.client else "unknown"
+    now_min = int(time.time() // 60)
+    rl_key = f"botcheck:{client_ip}:{now_min}"
+    _BOT_CHECK_RL[rl_key] = _BOT_CHECK_RL.get(rl_key, 0) + 1
+    # Evict old keys (keep only current + previous minute)
+    for k in list(_BOT_CHECK_RL):
+        if k.split(":")[-1] != str(now_min) and k.split(":")[-1] != str(now_min - 1):
+            _BOT_CHECK_RL.pop(k, None)
+    if _BOT_CHECK_RL[rl_key] > 120:
+        return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
+
+    tg_username = _normalize_tg_username(request.query_params.get("tg_username", ""))
+    chat_id_raw = request.query_params.get("chat_id", "")
+
+    matched_user = None
+    for u in USERS.values():
+        if tg_username and _normalize_tg_username(u.get("tg_username", "")) == tg_username:
+            matched_user = u
+            break
+        if chat_id_raw:
+            try:
+                if u.get("tg_chat_id") == int(chat_id_raw):
+                    matched_user = u
+                    break
+            except (ValueError, TypeError):
+                pass
+
+    if not matched_user:
+        return JSONResponse({"ok": True, "approved": False, "username": None})
+
+    return JSONResponse({
+        "ok": True,
+        "approved": bool(matched_user.get("subscription_approved")),
+        "username": matched_user.get("username"),
+    })
 
 
 def run():

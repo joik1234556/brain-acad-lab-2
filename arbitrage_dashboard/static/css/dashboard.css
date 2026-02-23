@@ -43,8 +43,12 @@ tr{transition:background .1s} tr:hover{background:rgba(128,136,160,.07)} .pinned
 .long{color:var(--good);font-weight:700;font-size:11px;letter-spacing:.03em}.short{color:var(--bad);font-weight:700;font-size:11px;letter-spacing:.03em}.xlogo{width:18px;height:18px;object-fit:contain;border-radius:50%}
 .split-cell{padding:0!important}.split-cell .line{display:flex;align-items:center;min-height:34px;padding:0 12px}.split-cell .line + .line{border-top:1px solid var(--line)}
 .auth-wrap{margin:8px 0 0;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--bg)}
+.auth-col{display:flex;flex-direction:column;gap:8px}
 .auth-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .auth-row input{max-width:200px}
+.auth-tg-row{display:flex;gap:0;align-items:center;border:1px solid var(--line);border-radius:8px;overflow:hidden;max-width:220px}
+.auth-tg-row .tg-at{padding:0 8px;color:var(--muted);background:var(--bg2,var(--bg));font-size:14px;line-height:36px;border-right:1px solid var(--line);user-select:none;white-space:nowrap}
+.auth-tg-row #authTg{border:none;border-radius:0;padding:0 10px;height:36px;background:transparent;color:var(--text);flex:1;min-width:120px;outline:none;font-size:13px}
 #authForm{display:none}
 .small{font-size:12px;color:var(--muted)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono{font-family:ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace}
@@ -65,6 +69,7 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}.mono
 .auth-wrap{padding:8px 10px}
 .auth-row{flex-direction:column;align-items:stretch;gap:6px}
 .auth-row .btn{width:100%;text-align:center;padding:10px}.auth-row input{max-width:100%!important;width:100%}
+.auth-tg-row{max-width:100%!important;width:100%}
 .meta{gap:5px}.badge{padding:4px 10px;font-size:10px}
 .table-wrap{overflow:visible;border:none;background:transparent;box-shadow:none;border-radius:0;margin:0 -2px}
 table{display:block;min-width:unset;width:100%}

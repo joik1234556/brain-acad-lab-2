@@ -102,9 +102,9 @@ function startFundingRefresh(exchanges){
 // ────────────────────────────────────────────────────────────────────────────
 let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
 const I18N={
-  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку'},
-  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку'},
-  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription'}
+  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необязательно)'},
+  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необов\'язково)'},
+  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription',tgPlaceholder:'telegram_username',tgLabel:'Telegram (optional)'}
 };
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
@@ -136,19 +136,21 @@ async function encryptWithPub(plain){
   return b64(enc);
 }
 function setAuthStateText(msg){document.getElementById('authState').textContent=msg;}
-function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn;}
+function openAuthForm(mode){STATE.authMode=mode; const f=document.getElementById('authForm'); f.style.display='flex'; document.getElementById('authContainer').style.display='block'; const t=I18N[STATE.lang]||I18N.ru; document.getElementById('btnAuthSubmit').textContent=mode==='register'?t.registerBtn:t.loginBtn; const tgRow=document.getElementById('authTgRow'); if(tgRow){tgRow.style.display=mode==='register'?'flex':'none'; const tgInput=document.getElementById('authTg'); if(tgInput){tgInput.placeholder=t.tgPlaceholder||'telegram_username'; if(mode!=='register')tgInput.value='';}}} 
 function closeAuthForm(){document.getElementById('authForm').style.display='none'; if(document.getElementById('adminBox').style.display!=='block') document.getElementById('authContainer').style.display='none';}
 async function registerUser(){
   const btn=document.getElementById('btnAuthSubmit');
   if(btn.disabled)return;
   const u=document.getElementById('authUser').value.trim();
   const p=document.getElementById('authPass').value;
+  const tgRaw=(document.getElementById('authTg')||{}).value||'';
+  const tg=tgRaw.trim().replace(/^@/,'');
   const t=I18N[STATE.lang]||I18N.ru;
   if(!u||!p){setAuthStateText(t.enterCreds);return;}
   btn.disabled=true; const origTxt=btn.textContent; btn.textContent='...';
   try{
-    let payload={username:u,password:p};
-    try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe};}catch(_e){}
+    let payload={username:u,password:p,tg_username:tg};
+    try{const[ue,pe]=await Promise.all([encryptWithPub(u),encryptWithPub(p)]);payload={username:u,password:p,username_enc:ue,password_enc:pe,tg_username:tg};}catch(_e){}
     const r=await apiPost('/api/auth/register',payload);
     setAuthStateText(r.ok?t.regOk:t.regErr+(r.error||'unknown'));
     if(r.ok)closeAuthForm();
@@ -215,7 +217,13 @@ async function loadUsersAdmin(){
   if(!r.ok){document.getElementById('adminUsers').textContent=t.noAccess; return;}
   const box=document.getElementById('adminUsers');
   box.innerHTML='';
-  r.users.forEach(x=>{const row=document.createElement('div'); row.style.margin='4px 0'; const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?t.disableSub:t.approveSub; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.textContent=`${x.username} ${x.is_admin?'(admin)':''} ${x.subscription_approved?'✅':'⏳'} `; if(!x.is_admin)row.appendChild(btn); box.appendChild(row);});
+  r.users.forEach(x=>{
+    const row=document.createElement('div'); row.style.margin='4px 0';
+    const tgInfo=x.tg_username?` @${x.tg_username}${x.tg_chat_id?' 🔗':' ⏳'}`:'';
+    row.textContent=`${x.username} ${x.is_admin?'(admin)':''}${tgInfo} ${x.subscription_approved?'✅':'⏳'} `;
+    if(!x.is_admin){const btn=document.createElement('button'); btn.className='btn'; btn.textContent=x.subscription_approved?t.disableSub:t.approveSub; btn.onclick=async()=>{await apiPost('/api/admin/subscription',{username:x.username,approved:!x.subscription_approved}); await loadUsersAdmin();}; row.appendChild(btn);}
+    box.appendChild(row);
+  });
 }
 
 function parseVolumeInput(raw){const s=(raw||'').toString().trim().toLowerCase().replace(',', '.').replace('м','m'); if(!s) return 0; const m=s.match(/^([0-9]+(?:\.[0-9]+)?)([kmb])?$/i); if(!m) return parseFloat(s)||0; const v=parseFloat(m[1]); const suf=(m[2]||'').toLowerCase(); if(suf==='k') return v*1e3; if(suf==='m') return v*1e6; if(suf==='b') return v*1e9; return v;}
