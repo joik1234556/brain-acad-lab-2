@@ -38,7 +38,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 import uvicorn
 
 from models import MarketRow
@@ -142,19 +142,36 @@ def _get_or_create_auth_key() -> bytes:
     return key
 
 
-def _hash_password(password: str, salt_b64: str) -> str:
+PBKDF2_ITERS = 100_000  # iterations for new passwords; legacy hashes stored with 250k
+
+
+def _hash_password(password: str, salt_b64: str, iters: int = PBKDF2_ITERS) -> str:
     salt = base64.b64decode(salt_b64.encode("utf-8"))
-    raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 250_000)
+    raw = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
     return base64.b64encode(raw).decode("utf-8")
 
 
 def _make_password_record(password: str) -> Tuple[str, str]:
     salt_b64 = base64.b64encode(secrets.token_bytes(16)).decode("utf-8")
-    return salt_b64, _hash_password(password, salt_b64)
+    return salt_b64, _hash_password(password, salt_b64, PBKDF2_ITERS)
 
 
-def _verify_password(password: str, salt_b64: str, expected_hash: str) -> bool:
-    return secrets.compare_digest(_hash_password(password, salt_b64), expected_hash)
+def _verify_password(password: str, salt_b64: str, expected_hash: str, iters: int = PBKDF2_ITERS) -> bool:
+    return secrets.compare_digest(_hash_password(password, salt_b64, iters), expected_hash)
+
+
+def _do_login_verify(payload: Dict[str, Any], users_snapshot: Dict[str, Any]) -> Optional[Tuple[str, str, str, bool]]:
+    """Run in a thread: RSA decrypt + PBKDF2 verify in ONE call (avoids two thread pool round-trips).
+    Returns (username, password, tg, needs_hash_upgrade) or None if invalid credentials."""
+    username, password, tg = _extract_auth_credentials(payload)
+    user = users_snapshot.get(username)
+    if not user:
+        return None
+    stored_iters = int(user.get("pbkdf2_iters", 250_000))  # legacy hashes used 250k
+    if not _verify_password(password, user.get("salt", ""), user.get("password_hash", ""), stored_iters):
+        return None
+    needs_upgrade = stored_iters != PBKDF2_ITERS
+    return username, password, tg, needs_upgrade
 
 
 def _normalize_username(username: str) -> str:
@@ -1179,20 +1196,33 @@ def _rl_check(store: Dict[str, int], key: str, limit: int) -> bool:
     return store[key] <= limit
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add security headers to every HTTP response.
-    Also sets Cache-Control: immutable on static assets (CSS/JS/images).
-    """
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
-        # Static assets have a ?v=... cache-buster — safe to cache forever in browser
-        if request.url.path.startswith("/static/"):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        return response
+class SecurityHeadersMiddleware:
+    """Pure ASGI security headers middleware — zero body-buffering overhead.
+    BaseHTTPMiddleware buffers the response body twice; this implementation
+    intercepts only the http.response.start ASGI message (no body reads)."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self._app(scope, receive, send)
+            return
+
+        is_static = scope.get("path", "").startswith("/static/")
+
+        async def send_with_headers(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                hdrs = MutableHeaders(scope=message)
+                hdrs.setdefault("X-Content-Type-Options", "nosniff")
+                hdrs.setdefault("X-Frame-Options", "SAMEORIGIN")
+                hdrs.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+                hdrs.setdefault("X-XSS-Protection", "1; mode=block")
+                if is_static:
+                    hdrs["Cache-Control"] = "public, max-age=31536000, immutable"
+            await send(message)
+
+        await self._app(scope, receive, send_with_headers)
 
 
 def _session_user(request: Request) -> Optional[Dict[str, Any]]:
@@ -1940,6 +1970,7 @@ async def api_auth_register(request: Request, payload: Dict[str, Any]):
             "username": username,
             "salt": salt,
             "password_hash": pwh,
+            "pbkdf2_iters": PBKDF2_ITERS,
             "is_admin": False,
             "subscription_approved": False,
             "tg_username": tg_username,
@@ -1980,13 +2011,13 @@ async def api_auth_login(request: Request, payload: Dict[str, Any]):
     if _LOGIN_FAIL.get(fail_key, 0) >= 5:
         return JSONResponse({"ok": False, "error": "too_many_failures"}, status_code=429)
 
-    # RSA decrypt + PBKDF2 verify are CPU-bound (≥200ms). Run in thread pool.
-    username, password, _tg = await asyncio.to_thread(_extract_auth_credentials, payload)
-
-    user = USERS.get(username)
-    if not user or not await asyncio.to_thread(
-        _verify_password, password, user.get("salt", ""), user.get("password_hash", "")
-    ):
+    # RSA decrypt + PBKDF2 verify combined in ONE thread call.
+    # Combining avoids two separate asyncio.to_thread round-trips (thread pool
+    # scheduling overhead + potential queue wait on VPS with 1 vCPU).
+    # _do_login_verify also reads USERS inside the thread (snapshot is safe to read
+    # without the lock since we only need a consistent in-memory snapshot).
+    result = await asyncio.to_thread(_do_login_verify, payload, dict(USERS))
+    if result is None:
         _LOGIN_FAIL[fail_key] = _LOGIN_FAIL.get(fail_key, 0) + 1
         # Evict other-minute fail keys to prevent unbounded growth
         for k in list(_LOGIN_FAIL):
@@ -1994,8 +2025,25 @@ async def api_auth_login(request: Request, payload: Dict[str, Any]):
                 _LOGIN_FAIL.pop(k, None)
         return JSONResponse({"ok": False, "error": "bad_login"}, status_code=401)
 
+    username, password, _tg, needs_upgrade = result
+
     # Clear fail counter on successful login
     _LOGIN_FAIL.pop(fail_key, None)
+
+    # Transparently upgrade legacy 250k-iteration hashes to PBKDF2_ITERS (100k).
+    # This runs in background so it never delays the login response.
+    if needs_upgrade:
+        async def _upgrade_hash() -> None:
+            new_salt, new_hash = await asyncio.to_thread(_make_password_record, password)
+            async with USERS_LOCK:
+                if username in USERS:
+                    USERS[username]["salt"] = new_salt
+                    USERS[username]["password_hash"] = new_hash
+                    USERS[username]["pbkdf2_iters"] = PBKDF2_ITERS
+                    await asyncio.to_thread(_save_users, USERS)
+        asyncio.create_task(_upgrade_hash())
+
+    user = USERS.get(username, {})
     token = _make_session(username)
     return JSONResponse(
         {
