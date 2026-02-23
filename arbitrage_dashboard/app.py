@@ -1089,6 +1089,7 @@ USERS = _load_users()
 USERS_LOCK = asyncio.Lock()
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 _BOT_CHECK_RL: Dict[str, int] = {}  # IP-based rate limit counters for /api/bot/check-subscription
+_TG_LINK_CODES: Dict[str, Dict[str, Any]] = {}  # {token: {username, expires_at}}
 
 
 def _make_session(username: str) -> str:
@@ -1800,6 +1801,8 @@ async def api_auth_login(payload: Dict[str, Any]):
                 "username": user["username"],
                 "is_admin": bool(user.get("is_admin")),
                 "subscription_approved": bool(user.get("subscription_approved")),
+                "tg_username": user.get("tg_username") or "",
+                "tg_chat_id": user.get("tg_chat_id"),
             },
         }
     )
@@ -1817,6 +1820,8 @@ async def api_auth_me(request: Request):
                 "username": user["username"],
                 "is_admin": bool(user.get("is_admin")),
                 "subscription_approved": bool(user.get("subscription_approved")),
+                "tg_username": user.get("tg_username") or "",
+                "tg_chat_id": user.get("tg_chat_id"),
             },
         }
     )
@@ -1901,19 +1906,30 @@ async def api_bot_check_subscription(request: Request):
 
     tg_username = _normalize_tg_username(request.query_params.get("tg_username", ""))
     chat_id_raw = request.query_params.get("chat_id", "")
+    chat_id_int: Optional[int] = None
+    if chat_id_raw:
+        try:
+            chat_id_int = int(chat_id_raw)
+        except (ValueError, TypeError):
+            pass
 
     matched_user = None
     for u in USERS.values():
+        # Priority 1: match by resolved tg_chat_id (most reliable)
+        if chat_id_int is not None and u.get("tg_chat_id") == chat_id_int:
+            matched_user = u
+            break
+        # Priority 2: match by tg_username stored at registration (fallback)
         if tg_username and _normalize_tg_username(u.get("tg_username", "")) == tg_username:
             matched_user = u
             break
-        if chat_id_raw:
-            try:
-                if u.get("tg_chat_id") == int(chat_id_raw):
-                    matched_user = u
-                    break
-            except (ValueError, TypeError):
-                pass
+
+    if not matched_user and chat_id_int is not None:
+        # Priority 3: try both in one pass (chat_id may have arrived before username match)
+        for u in USERS.values():
+            if _normalize_tg_username(u.get("tg_username", "")) == tg_username and tg_username:
+                matched_user = u
+                break
 
     if not matched_user:
         return JSONResponse({"ok": True, "approved": False, "username": None})
@@ -1922,7 +1938,80 @@ async def api_bot_check_subscription(request: Request):
         "ok": True,
         "approved": bool(matched_user.get("subscription_approved")),
         "username": matched_user.get("username"),
+        "tg_linked": matched_user.get("tg_chat_id") is not None,
     })
+
+
+@app.get("/api/user/link-code")
+async def api_user_link_code(request: Request):
+    """
+    Returns a one-time deep-link for the logged-in user to connect their Telegram account.
+    The user opens the link in Telegram (t.me/BOT?start=link_TOKEN); the bot sends
+    POST /api/bot/link-telegram with {code, chat_id} to complete the binding.
+    Token is valid for 15 minutes.
+    """
+    user = _session_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
+    username = user["username"]
+    now = time.time()
+
+    # Prune expired codes
+    for k in list(_TG_LINK_CODES):
+        if _TG_LINK_CODES[k]["expires_at"] < now:
+            _TG_LINK_CODES.pop(k, None)
+
+    # Generate a new code even if already linked (re-linking allowed)
+    code = secrets.token_hex(16)  # 32 hex chars
+    _TG_LINK_CODES[code] = {"username": username, "expires_at": now + 900}  # 15 min
+
+    bot = TELEGRAM_BOT_USERNAME.lstrip("@")
+    link = f"https://t.me/{bot}?start=link_{code}"
+    return JSONResponse({"ok": True, "code": code, "link": link})
+
+
+@app.post("/api/bot/link-telegram")
+async def api_bot_link_telegram(request: Request):
+    """
+    Called by the Telegram bot when a user sends /start link_<code>.
+    Body: {code: str, chat_id: int}
+    Validates the code, stores tg_chat_id in the user record, sends confirmation.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+
+    code = str(payload.get("code", "")).strip()
+    try:
+        chat_id = int(payload.get("chat_id", 0))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "invalid chat_id"}, status_code=400)
+
+    if not code or not chat_id:
+        return JSONResponse({"ok": False, "error": "code and chat_id required"}, status_code=400)
+
+    now = time.time()
+    entry = _TG_LINK_CODES.get(code)
+    if not entry or entry["expires_at"] < now:
+        return JSONResponse({"ok": False, "error": "invalid or expired code"}, status_code=400)
+
+    username = entry["username"]
+    _TG_LINK_CODES.pop(code, None)  # one-time use
+
+    async with USERS_LOCK:
+        if username not in USERS:
+            return JSONResponse({"ok": False, "error": "user not found"}, status_code=404)
+        USERS[username]["tg_chat_id"] = chat_id
+        _save_users(USERS)
+
+    logger.info("Telegram chat_id=%s linked to user=%s via deep-link code", chat_id, username)
+
+    # Confirm to the user
+    asyncio.create_task(_tg_send(chat_id, "✅ Ваш Telegram успешно привязан к аккаунту на сайте!"))
+
+    return JSONResponse({"ok": True, "username": username})
 
 
 def run():

@@ -102,9 +102,9 @@ function startFundingRefresh(exchanges){
 // ────────────────────────────────────────────────────────────────────────────
 let STATE={config:null,data:null,pinned:new Set(JSON.parse(localStorage.getItem('pinnedPairs')||'[]')),theme:localStorage.getItem('theme')||'theme-classic',sound:(localStorage.getItem('soundOn')||'0')==='1',lang:localStorage.getItem('lang')||'ru',soundFile:localStorage.getItem('soundFile')||'sms.wav',assets:{logos:{},sounds:[]},sortKey:'spread',sortDir:'desc',token:localStorage.getItem('authToken')||'',user:null,publicKey:'',authMode:'login'};
 const I18N={
-  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необязательно)'},
-  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необов\'язково)'},
-  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription',tgPlaceholder:'telegram_username',tgLabel:'Telegram (optional)'}
+  ru:{filterTitle:'Фильтр',search:'Поиск монеты',vol:'Оборот 24h (USD)',spread:'OpenSpread, %',lang:'Язык',theme:'Тема',alert:'Оповещение',ex:'Биржи',clearFilters:'Очистить фильтр',clear:'Очистить',token:'Токен',pair:'Покупка / Продажа',price:'Цена вход/выход',register:'Регистрация',login:'Вход',logout:'Выход',guestAccess:'Гость: доступ',guestLimit:'до 2% спреда',userPrefix:'Пользователь:',adminRole:'admin (без лимита)',userRole:'пользователь (без лимита)',cancelBtn:'Скрыть',continueBtn:'Продолжить',registerBtn:'Зарегистрироваться',loginBtn:'Войти',loadUsers:'Загрузить пользователей',noAccess:'Нет доступа',enterCreds:'Введите логин и пароль',regOk:'Регистрация успешна',regErr:'Ошибка регистрации: ',loginErr:'Ошибка входа: ',showFilter:'Показать фильтр',hideFilter:'Скрыть фильтр',soundCheck:'звук',notFound:'Ничего не найдено.',loading:'Загрузка...',disableSub:'Отключить подписку',approveSub:'Подтвердить подписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необязательно)',linkTg:'🔗 Привязать Telegram',linkTgPending:'⏳ Telegram не привязан',linkTgLinked:'✅ Telegram привязан'},
+  uk:{filterTitle:'Фільтр',search:'Пошук монети',vol:'Обсяг 24h (USD)',spread:'OpenSpread, %',lang:'Мова',theme:'Тема',alert:'Сповіщення',ex:'Біржі',clearFilters:'Очистити фільтр',clear:'Очистити',token:'Токен',pair:'Купівля / Продаж',price:'Ціна вхід/вихід',register:'Реєстрація',login:'Вхід',logout:'Вихід',guestAccess:'Гість: доступ',guestLimit:'до 2% спреду',userPrefix:'Користувач:',adminRole:'admin (без ліміту)',userRole:'користувач (без ліміту)',cancelBtn:'Сховати',continueBtn:'Продовжити',registerBtn:'Зареєструватися',loginBtn:'Увійти',loadUsers:'Завантажити користувачів',noAccess:'Немає доступу',enterCreds:'Введіть логін і пароль',regOk:'Реєстрація успішна',regErr:'Помилка реєстрації: ',loginErr:'Помилка входу: ',showFilter:'Показати фільтр',hideFilter:'Сховати фільтр',soundCheck:'звук',notFound:'Нічого не знайдено.',loading:'Завантаження...',disableSub:'Вимкнути підписку',approveSub:'Підтвердити підписку',tgPlaceholder:'telegram_username',tgLabel:'Telegram (необов\'язково)',linkTg:'🔗 Прив\'язати Telegram',linkTgPending:'⏳ Telegram не прив\'язано',linkTgLinked:'✅ Telegram прив\'язано'},
+  en:{filterTitle:'Filter',search:'Search coin',vol:'24h Volume (USD)',spread:'OpenSpread, %',lang:'Language',theme:'Theme',alert:'Alert',ex:'Exchanges',clearFilters:'Clear filter',clear:'Clear',token:'Token',pair:'Buy / Sell',price:'Entry/Exit price',register:'Register',login:'Login',logout:'Logout',guestAccess:'Guest: access',guestLimit:'up to 2% spread',userPrefix:'User:',adminRole:'admin (no limit)',userRole:'user (no limit)',cancelBtn:'Hide',continueBtn:'Continue',registerBtn:'Register',loginBtn:'Sign in',loadUsers:'Load users',noAccess:'No access',enterCreds:'Enter login and password',regOk:'Registration successful',regErr:'Registration error: ',loginErr:'Login error: ',showFilter:'Show filter',hideFilter:'Hide filter',soundCheck:'sound',notFound:'Nothing found.',loading:'Loading...',disableSub:'Disable subscription',approveSub:'Approve subscription',tgPlaceholder:'telegram_username',tgLabel:'Telegram (optional)',linkTg:'🔗 Link Telegram',linkTgPending:'⏳ Telegram not linked',linkTgLinked:'✅ Telegram linked'}
 };
 const FALLBACK_LOGO={MEXC:'',Bybit:'',BingX:''};
 
@@ -191,6 +191,9 @@ function renderAuth(){
   const bLogin=document.getElementById('btnLogin');
   const bReg=document.getElementById('btnRegister');
   const bOut=document.getElementById('btnLogout');
+  // Remove any previously injected tg-link button to avoid duplicates
+  const prevTgBtn=document.getElementById('btnLinkTg');
+  if(prevTgBtn) prevTgBtn.remove();
   const lim=STATE.data&&STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit)?`до ${(STATE.data.access.spread_limit*100).toFixed(0)}%`:'';
   if(!u){
     setAuthStateText(`${t.guestAccess} ${lim||t.guestLimit}`);
@@ -210,6 +213,28 @@ function renderAuth(){
   bLogin.style.display='none';
   bReg.style.display='none';
   bOut.style.display='inline-block';
+  // Show Telegram link button when tg_username set but tg_chat_id not yet resolved
+  if(u.tg_username && !u.tg_chat_id){
+    const btn=document.createElement('button');
+    btn.id='btnLinkTg'; btn.className='btn'; btn.style.cssText='margin-left:6px;font-size:11px;padding:3px 8px;';
+    btn.title=t.linkTgPending; btn.textContent=t.linkTg;
+    btn.onclick=async()=>{
+      btn.disabled=true; btn.textContent='…';
+      try{
+        const r=await apiGet('/api/user/link-code');
+        if(r&&r.ok&&r.link){ window.open(r.link,'_blank','noopener'); btn.textContent=t.linkTgPending; }
+        else { btn.textContent=t.linkTg; }
+      }catch(_e){ btn.textContent=t.linkTg; }
+      finally{ btn.disabled=false; }
+    };
+    bOut.after(btn);
+  } else if(u.tg_chat_id){
+    // Already linked — show a small green indicator
+    const span=document.createElement('span');
+    span.id='btnLinkTg'; span.style.cssText='margin-left:6px;font-size:11px;color:#4caf50;';
+    span.textContent=t.linkTgLinked;
+    bOut.after(span);
+  }
 }
 async function loadUsersAdmin(){
   const t=I18N[STATE.lang]||I18N.ru;
