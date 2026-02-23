@@ -1121,10 +1121,27 @@ def _session_user(request: Request) -> Optional[Dict[str, Any]]:
     return user
 
 
+def _is_subscription_active(user: Dict[str, Any]) -> bool:
+    """Return True when subscription_approved=True AND not past expiry date (if set)."""
+    if not user.get("subscription_approved"):
+        return False
+    expires_at = user.get("subscription_expires")
+    if expires_at is not None:
+        try:
+            if time.time() > float(expires_at):
+                # Lazy expiry: clear flag so future calls are fast
+                user["subscription_approved"] = False
+                user["subscription_expires"] = None
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
 def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> Tuple[List[dict], Optional[float], bool, bool]:
     is_admin = bool(user and user.get("is_admin"))
     is_logged = bool(user)
-    is_paid = bool(user and user.get("subscription_approved"))
+    is_paid = bool(user and _is_subscription_active(user))
     spread_limit: Optional[float] = None
     if not is_logged:
         spread_limit = MAX_FREE_SPREAD
@@ -1806,7 +1823,7 @@ async def api_auth_login(payload: Dict[str, Any]):
             "user": {
                 "username": user["username"],
                 "is_admin": bool(user.get("is_admin")),
-                "subscription_approved": bool(user.get("subscription_approved")),
+                "subscription_approved": _is_subscription_active(user),
                 "tg_username": user.get("tg_username") or "",
                 "tg_chat_id": user.get("tg_chat_id"),
             },
@@ -1825,7 +1842,7 @@ async def api_auth_me(request: Request):
             "user": {
                 "username": user["username"],
                 "is_admin": bool(user.get("is_admin")),
-                "subscription_approved": bool(user.get("subscription_approved")),
+                "subscription_approved": _is_subscription_active(user),
                 "tg_username": user.get("tg_username") or "",
                 "tg_chat_id": user.get("tg_chat_id"),
             },
@@ -1851,7 +1868,8 @@ async def api_admin_users(request: Request):
         items.append({
             "username": u.get("username"),
             "is_admin": bool(u.get("is_admin")),
-            "subscription_approved": bool(u.get("subscription_approved")),
+            "subscription_approved": _is_subscription_active(u),
+            "subscription_expires": u.get("subscription_expires"),
             "tg_username": u.get("tg_username") or "",
             "tg_chat_id": u.get("tg_chat_id"),
             "created_at": u.get("created_at"),
@@ -1867,12 +1885,22 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
         return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
     username = _normalize_username(str(payload.get("username") or ""))
     approved = bool(payload.get("approved"))
+    # days: how long the subscription is valid (30/60/90/180/365); 0 = indefinite
+    VALID_DAYS = {0, 30, 60, 90, 180, 365}
+    try:
+        days = int(payload.get("days") or 0)
+    except (TypeError, ValueError):
+        days = 0
+    if days not in VALID_DAYS:
+        days = 0
     if not username or username not in USERS:
         return JSONResponse({"ok": False, "error": "user_not_found"}, status_code=404)
     if USERS[username].get("is_admin"):
         return JSONResponse({"ok": False, "error": "cant_change_admin"}, status_code=400)
+    expires_at: Optional[float] = (time.time() + days * 86400) if (approved and days > 0) else None
     async with USERS_LOCK:
         USERS[username]["subscription_approved"] = approved
+        USERS[username]["subscription_expires"] = expires_at
         _save_users(USERS)
         # Read notification targets inside lock to avoid race
         chat_id = USERS[username].get("tg_chat_id")
@@ -1881,15 +1909,23 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
     # Notify user via Telegram bot (non-blocking background task)
     if chat_id or tg_user:
         safe_bot = _tg_escape(TELEGRAM_BOT_USERNAME)
-        msg = (
-            f"✅ <b>Подписка активирована!</b>\nТеперь вы можете видеть все спреды на сайте.\n🤖 Бот @{safe_bot} активен для вашего аккаунта."
-            if approved else
-            f"❌ <b>Подписка отключена.</b>\nДоступ ограничен до спредов ≤2%.\n🤖 Бот @{safe_bot} приостановлен."
-        )
+        if approved:
+            period_str = f" на {days} дней" if days else " (бессрочно)"
+            msg = (
+                f"✅ <b>Подписка активирована{period_str}!</b>\n"
+                f"Теперь вы можете видеть все спреды на сайте.\n"
+                f"🤖 Бот @{safe_bot} активен для вашего аккаунта."
+            )
+        else:
+            msg = (
+                f"❌ <b>Подписка отключена.</b>\n"
+                f"Доступ ограничен до спредов ≤2%.\n"
+                f"🤖 Бот @{safe_bot} приостановлен."
+            )
         target = chat_id or f"@{tg_user}"
         asyncio.create_task(_tg_send(target, msg))
 
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "expires_at": expires_at})
 
 
 @app.post("/api/admin/delete-user")
@@ -1972,7 +2008,7 @@ async def api_bot_check_subscription(request: Request):
 
     return JSONResponse({
         "ok": True,
-        "approved": bool(matched_user.get("subscription_approved")),
+        "approved": _is_subscription_active(matched_user),
         "username": matched_user.get("username"),
         "tg_linked": matched_user.get("tg_chat_id") is not None,
     })
