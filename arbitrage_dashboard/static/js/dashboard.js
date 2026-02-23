@@ -372,8 +372,12 @@ existingRows.forEach(tr=>tr.remove());
 }
 
 async function refreshData(){
-  try{ STATE.data=await apiGet('/api/data'); }
-  catch(e){ console.error('refreshData failed',e); return; }
+  try{
+    // cache:'no-cache' sends If-None-Match; 304 = data unchanged → skip re-render
+    const resp=await fetch('/api/data',{cache:'no-cache',headers:authHeaders({})});
+    if(resp.status===304)return;
+    STATE.data=await resp.json();
+  }catch(e){console.error('refreshData failed',e);return;}
   render();
 }
 
@@ -436,17 +440,23 @@ async function boot(){
   startFundingRefresh(['Bybit','BingX']);
 
   let _sseActive=false;
+  let _refreshInFlight=false;
+  async function safeRefresh(){
+    if(_refreshInFlight)return;
+    _refreshInFlight=true;
+    try{await refreshData();}catch(_e){}finally{_refreshInFlight=false;}
+  }
   function connectSSE(){
     if(typeof EventSource==='undefined')return;
     const src=new EventSource('/events');
     src.onopen=()=>{_sseActive=true;};
-    src.onmessage=async e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')await refreshData();}catch(_e){}};
+    src.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')safeRefresh();}catch(_e){}};
     src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
   }
   connectSSE();
   // Fallback: poll /api/data when SSE is not active (e.g. proxy drops connection).
   // Interval matches server refresh cycle (DEFAULT_REFRESH_SEC=30) so we don't
   // hammer the server with requests that return stale data anyway.
-  setInterval(async()=>{if(!_sseActive)await refreshData();},30000);
+  setInterval(()=>{if(!_sseActive)safeRefresh();},30000);
 }
 boot();

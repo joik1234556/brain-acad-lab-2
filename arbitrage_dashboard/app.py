@@ -1369,7 +1369,8 @@ _SSE_QUEUES: List[asyncio.Queue] = []
 # Built once at the end of each compute_once() cycle; served as raw bytes in
 # api_data() without any Redis I/O, JSON parsing, sorting, or serialisation.
 # With N concurrent users, /api/data cost drops from O(N * rows) to O(1).
-_DATA_CACHE: Dict[str, bytes] = {}  # keys: "guest", "paid", "admin"
+_DATA_CACHE: Dict[str, bytes] = {}       # keys: "guest", "paid", "admin"
+_DATA_ETAG:  Dict[str, str]  = {}       # keys: "guest", "paid", "admin" → short ETag
 # Persistent aiohttp session shared across all compute_once() cycles.
 # Created in lifespan() and closed on shutdown to reuse TCP connections.
 _HTTP_SESSION: Optional[aiohttp.ClientSession] = None
@@ -1622,6 +1623,7 @@ def _rebuild_data_cache(rows_out: List[dict], cache_meta: dict) -> None:
             },
         }
         _DATA_CACHE[tier] = json.dumps(data, ensure_ascii=False).encode()
+        _DATA_ETAG[tier]  = '"' + hashlib.sha256(_DATA_CACHE[tier]).hexdigest()[:16] + '"'
 
 
 async def compute_once() -> Dict[str, Any]:
@@ -1943,8 +1945,13 @@ async def api_data(request: Request):
 
     cached = _DATA_CACHE.get(tier)
     if cached:
+        etag = _DATA_ETAG.get(tier, "")
+        if etag and request.headers.get("If-None-Match") == etag:
+            from starlette.responses import Response as _Resp
+            return _Resp(status_code=304, headers={"ETag": etag})
         from starlette.responses import Response as _Resp
-        return _Resp(content=cached, media_type="application/json")
+        return _Resp(content=cached, media_type="application/json",
+                     headers={"ETag": etag} if etag else {})
 
     # Fallback: first request before compute_once() has run at least once.
     live = await _rlive_all()
@@ -2012,8 +2019,6 @@ async def sse_stream(request: Request):
     async def generate():
         try:
             while True:
-                if await request.is_disconnected():
-                    break
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=25.0)
                     yield f"data: {payload}\n\n"
