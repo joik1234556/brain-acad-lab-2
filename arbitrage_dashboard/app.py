@@ -1001,6 +1001,11 @@ async def _push_pairs_to_live_rows(
     min_spread: float,
     symbols: Optional[set] = None,
 ) -> None:
+    """Compute best pairs and write to in-memory LIVE_ROWS immediately.
+
+    Redis sync is done once at the end of compute_once via _rlive_set_batch
+    (a single pipeline call) rather than N individual hset calls here.
+    """
     if symbols is None:
         symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
     for symbol in symbols:
@@ -1014,7 +1019,7 @@ async def _push_pairs_to_live_rows(
             pair["symbol"] = symbol
             key = f"{symbol}|{pair['buy_ex']}|{pair['sell_ex']}"
             pair["pair_key"] = key
-            await _rlive_set(key, pair)
+            LIVE_ROWS[key] = pair  # in-memory only; Redis batch at end of cycle
 
 
 def load_config() -> Dict[str, Any]:
@@ -1360,11 +1365,23 @@ async def _redis_disconnect() -> None:
 # LIVE_ROWS helpers -----------------------------------------------------------
 
 async def _rlive_set(pair_key: str, row: dict) -> None:
-    """Write one row to Redis hash (or in-memory dict)."""
+    """Write one row to in-memory dict only (use _rlive_set_batch for Redis)."""
     LIVE_ROWS[pair_key] = row
-    if _REDIS is not None:
+
+
+async def _rlive_set_batch(rows: Dict[str, dict]) -> None:
+    """Write multiple rows to in-memory LIVE_ROWS and Redis in a single pipeline.
+
+    This replaces calling _rlive_set() in a loop which produced N individual
+    Redis round-trips per cycle.  One pipeline call handles any number of rows.
+    """
+    LIVE_ROWS.update(rows)
+    if _REDIS is not None and rows:
         try:
-            await _REDIS.hset(_REDIS_KEY_LIVE, pair_key, json.dumps(row))
+            pipe = _REDIS.pipeline()
+            for k, v in rows.items():
+                pipe.hset(_REDIS_KEY_LIVE, k, json.dumps(v))
+            await pipe.execute()
         except Exception:
             pass
 
@@ -1531,14 +1548,12 @@ async def compute_once() -> Dict[str, Any]:
 
         sorted_candidates = [x[0] for x in sorted(candidates.items(), key=lambda item: item[1], reverse=True)]
 
-        # Phase 2: BingX – update LIVE_ROWS per coin as each symbol's data arrives
-        _bingx_count = 0
+        # Phase 2: BingX – update LIVE_ROWS per coin as each symbol's data arrives.
+        # No intermediate SSE broadcasts here — updater_loop broadcasts once after
+        # the whole cycle completes. Intermediate broadcasts would cause all connected
+        # clients to call /api/data ~8 times per cycle for no benefit.
         async def on_bingx_symbol(norm_sym: str, bingx_row: MarketRow) -> None:
-            nonlocal _bingx_count
             await _push_pairs_to_live_rows(mexc, bybit, {norm_sym: bingx_row}, min_vol, min_spread, {norm_sym})
-            _bingx_count += 1
-            if _bingx_count % 25 == 0:
-                _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
 
         bingx = await load_bingx(session, sorted_candidates, on_symbol=on_bingx_symbol) if enabled.get("BingX", True) else {}
     finally:
@@ -1579,13 +1594,13 @@ async def compute_once() -> Dict[str, Any]:
         }
         await _rhist_append(k, entry)
 
-    # Sync LIVE_ROWS: apply final authoritative data and remove stale pairs
+    # Sync LIVE_ROWS: apply final authoritative data and remove stale pairs.
+    # Use batch write to Redis (one pipeline call) instead of N individual hset calls.
     final_valid_keys = {r["pair_key"] for r in rows_out}
     stale_keys = [k for k in list(LIVE_ROWS) if k not in final_valid_keys]
     for k in stale_keys:
         await _rlive_del(k)
-    for r in rows_out:
-        await _rlive_set(r["pair_key"], r)
+    await _rlive_set_batch({r["pair_key"]: r for r in rows_out})
 
     # Persist cache metadata to Redis
     cache_meta = {

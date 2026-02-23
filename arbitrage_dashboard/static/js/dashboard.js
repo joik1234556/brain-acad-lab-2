@@ -444,6 +444,9 @@ async function boot(){
     src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
   }
   connectSSE();
-  setInterval(async()=>{if(!_sseActive)await refreshData();},3000);
+  // Fallback: poll /api/data when SSE is not active (e.g. proxy drops connection).
+  // Interval matches server refresh cycle (DEFAULT_REFRESH_SEC=30) so we don't
+  // hammer the server with requests that return stale data anyway.
+  setInterval(async()=>{if(!_sseActive)await refreshData();},30000);
 }
 boot();
