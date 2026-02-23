@@ -149,7 +149,8 @@ def _normalize_tg_username(raw: str) -> str:
 
 
 async def _tg_send(chat_id: int | str, text: str) -> bool:
-    """Send a Telegram message via Bot API. Returns True on success."""
+    """Send a Telegram message via Bot API. Returns True on success.
+    text must be valid Telegram HTML (use _tg_escape() for user-supplied strings)."""
     if not TELEGRAM_BOT_TOKEN:
         logger.debug("TELEGRAM_BOT_TOKEN not set — skipping tg_send")
         return False
@@ -164,6 +165,11 @@ async def _tg_send(chat_id: int | str, text: str) -> bool:
     except Exception as exc:
         logger.warning("tg_send exception: %s", exc)
         return False
+
+
+def _tg_escape(s: str) -> str:
+    """Escape user-supplied text for Telegram HTML parse_mode to prevent injection."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 async def _tg_resolve_chat_id(tg_username: str) -> Optional[int]:
@@ -1868,19 +1874,49 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
     async with USERS_LOCK:
         USERS[username]["subscription_approved"] = approved
         _save_users(USERS)
+        # Read notification targets inside lock to avoid race
+        chat_id = USERS[username].get("tg_chat_id")
+        tg_user = USERS[username].get("tg_username") or ""
 
     # Notify user via Telegram bot (non-blocking background task)
-    chat_id = USERS[username].get("tg_chat_id")
-    tg_user = USERS[username].get("tg_username") or ""
     if chat_id or tg_user:
+        safe_bot = _tg_escape(TELEGRAM_BOT_USERNAME)
         msg = (
-            f"✅ <b>Подписка активирована!</b>\nТеперь вы можете видеть все спреды на сайте.\n🤖 Бот @{TELEGRAM_BOT_USERNAME} активен для вашего аккаунта."
+            f"✅ <b>Подписка активирована!</b>\nТеперь вы можете видеть все спреды на сайте.\n🤖 Бот @{safe_bot} активен для вашего аккаунта."
             if approved else
-            f"❌ <b>Подписка отключена.</b>\nДоступ ограничен до спредов ≤2%.\n🤖 Бот @{TELEGRAM_BOT_USERNAME} приостановлен."
+            f"❌ <b>Подписка отключена.</b>\nДоступ ограничен до спредов ≤2%.\n🤖 Бот @{safe_bot} приостановлен."
         )
         target = chat_id or f"@{tg_user}"
         asyncio.create_task(_tg_send(target, msg))
 
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/delete-user")
+async def api_admin_delete_user(request: Request, payload: Dict[str, Any]):
+    """Admin: permanently delete a user account. Cannot delete admin accounts or self."""
+    admin = _session_user(request)
+    if not admin or not admin.get("is_admin"):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    username = _normalize_username(str(payload.get("username") or ""))
+    if not username or username not in USERS:
+        return JSONResponse({"ok": False, "error": "user_not_found"}, status_code=404)
+    if USERS[username].get("is_admin"):
+        return JSONResponse({"ok": False, "error": "cant_delete_admin"}, status_code=400)
+    if username == admin.get("username"):
+        return JSONResponse({"ok": False, "error": "cant_delete_self"}, status_code=400)
+    # Notify user via Telegram before deleting (non-blocking)
+    user_rec = USERS[username]
+    chat_id = user_rec.get("tg_chat_id")
+    tg_user = user_rec.get("tg_username") or ""
+    if chat_id or tg_user:
+        msg = "⚠️ <b>Ваш аккаунт был удалён администратором.</b>"
+        target = chat_id or f"@{tg_user}"
+        asyncio.create_task(_tg_send(target, msg))
+    async with USERS_LOCK:
+        USERS.pop(username, None)
+        _save_users(USERS)
+    logger.info("Admin %s deleted user %s", admin.get("username"), username)
     return JSONResponse({"ok": True})
 
 
