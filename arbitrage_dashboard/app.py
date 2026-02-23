@@ -97,6 +97,8 @@ BINGX_CONTRACTS = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 BINGX_BOOK_TICKER = "https://open-api.bingx.com/openApi/swap/v2/quote/bookTicker"
 BINGX_TICKER_24H = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 BINGX_PREMIUM_INDEX = "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex"
+# fundingRate endpoint (bulk, no symbol) returns fundingRate + nextFundingTime + fundingInterval
+BINGX_FUNDING_RATE = "https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate"
 # Timestamps > this value are in milliseconds; divide by 1000 to get seconds
 TIMESTAMP_MS_THRESHOLD = 1e12
 # How long to reuse a cached MEXC next-funding-time (seconds)
@@ -722,21 +724,31 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
             if norm and norm not in _BINGX_INTERVALS:
                 _BINGX_INTERVALS[norm] = ih
 
-        bulk_book_resp, bulk_tick_resp, bulk_prem_resp = await asyncio.gather(
+        bulk_book_resp, bulk_tick_resp, bulk_prem_resp, bulk_fund_resp = await asyncio.gather(
             fetch_json(session, BINGX_BOOK_TICKER),
             fetch_json(session, BINGX_TICKER_24H),
             fetch_json(session, BINGX_PREMIUM_INDEX),
+            fetch_json(session, BINGX_FUNDING_RATE),  # fundingRate+nextFundingTime+fundingInterval
             return_exceptions=True,
         )
         bulk_book: Dict[str, dict] = {}
         bulk_tick: Dict[str, dict] = {}
         bulk_prem: Dict[str, dict] = {}
+        # bulk_fund: key fields fundingRate, nextFundingTime (ms), fundingInterval (seconds)
+        bulk_fund: Dict[str, dict] = {}
         if not isinstance(bulk_book_resp, Exception):
             bulk_book = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_book_resp)}
         if not isinstance(bulk_tick_resp, Exception):
             bulk_tick = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_tick_resp)}
         if not isinstance(bulk_prem_resp, Exception):
             bulk_prem = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_prem_resp)}
+        if not isinstance(bulk_fund_resp, Exception):
+            bulk_fund = {normalize_symbol_key(str(x.get("symbol") or "")): x for x in _as_list(bulk_fund_resp)}
+            # Pre-populate _BINGX_INTERVALS from fundingInterval (seconds) in bulk_fund
+            for k, fr in bulk_fund.items():
+                ih = _norm_interval_h(_pick_float(fr, ["fundingInterval"]))
+                if ih > 0 and k not in _BINGX_INTERVALS:
+                    _BINGX_INTERVALS[k] = ih
 
         async def one(norm_sym: str) -> Optional[Tuple[str, MarketRow]]:
             raw = norm_to_raw.get(norm_sym)
@@ -765,15 +777,18 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                 book = dict(bulk_book.get(raw_key, {}))
                 tick = dict(bulk_tick.get(raw_key, {}))
                 prem = dict(bulk_prem.get(raw_key, {}))
+                # bulk_fund: fundingRate + nextFundingTime (ms) + fundingInterval (seconds)
+                fnd = dict(bulk_fund.get(raw_key, {}))
 
                 used_fallback = False
                 if not (book and tick):
                     used_fallback = True
                     async with sem:
-                        fb, ft, fp = await asyncio.gather(
+                        fb, ft, fp, ff = await asyncio.gather(
                             fetch_symbol(BINGX_BOOK_TICKER),
                             fetch_symbol(BINGX_TICKER_24H),
                             fetch_symbol(BINGX_PREMIUM_INDEX),
+                            fetch_symbol(BINGX_FUNDING_RATE),
                             return_exceptions=True,
                         )
                     if isinstance(fb, dict) and fb:
@@ -782,22 +797,10 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                         tick = ft
                     if isinstance(fp, dict) and fp:
                         prem = fp
-                        # Cache interval from per-symbol prem (single-symbol prem has fundingInterval in ms)
-                        ih = _pick_int(prem, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
+                    if isinstance(ff, dict) and ff:
+                        fnd = ff
+                        ih = _norm_interval_h(_pick_float(fnd, ["fundingInterval"]))
                         if ih > 0 and norm_sym not in _BINGX_INTERVALS:
-                            _BINGX_INTERVALS[norm_sym] = ih
-                elif not prem and norm_sym not in _BINGX_INTERVALS:
-                    # book+tick are in bulk but prem is absent for this symbol, AND we
-                    # don't have a cached interval.  Fetch per-symbol prem to get
-                    # nextFundingTime (needed to infer the interval).
-                    # After first successful fetch the interval is cached → no extra
-                    # call on subsequent cycles.
-                    async with sem:
-                        fp = await fetch_symbol(BINGX_PREMIUM_INDEX)
-                    if isinstance(fp, dict) and fp:
-                        prem = fp
-                        ih = _pick_int(prem, ["fundingInterval", "fundingIntervalHours", "fundingIntervalHour", "fundingRateInterval"], default=0)
-                        if ih > 0:
                             _BINGX_INTERVALS[norm_sym] = ih
 
                 bid = _pick_float(book, ["bidPrice", "bid", "bestBidPrice", "bestBid"])
@@ -821,10 +824,16 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                 if not is_pos(vol):
                     vol = _pick_float(contract, ["quoteVolume", "quoteVolume24h", "turnover", "turnover24h", "amount24", "volumeQuote"])
 
-                fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
+                # fundingRate: bulk_fund (most accurate) → prem → tick
+                fund = _pick_float(fnd, ["fundingRate", "lastFundingRate"])
+                if not math.isfinite(fund):
+                    fund = _pick_float(prem, ["fundingRate", "lastFundingRate", "funding"])
                 if not math.isfinite(fund):
                     fund = _pick_float(tick, ["fundingRate", "lastFundingRate", "funding"])
-                next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
+                # nextFundingTime: bulk_fund has it reliably; prem bulk does NOT
+                next_ts = _pick_ts(fnd, ["nextFundingTime", "nextFundingTimestamp", "fundingTime"])
+                if not math.isfinite(next_ts):
+                    next_ts = _pick_ts(prem, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
                 if not math.isfinite(next_ts):
                     next_ts = _pick_ts(contract, ["nextFundingTime", "nextFundingTimestamp", "nextSettleTime"])
 
@@ -838,13 +847,15 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["from_bulk"] += 1
 
                 # Compute interval BEFORE MarketRow so fund24_est uses the correct value.
-                # Priority 1: _BINGX_INTERVALS (from contracts or per-symbol prem above)
-                # Priority 2: contract dict inline (belt-and-suspenders in case pre-pop missed it)
-                # Priority 3: infer from nextFundingTime UTC alignment (now reliable: per-symbol
-                #   prem was fetched above when bulk prem was empty)
-                # Priority 4: default 8h (correct for most BingX coins)
+                # Priority 1: fundingInterval from bulk_fund (seconds, e.g. 28800=8h) — most reliable
+                # Priority 2: _BINGX_INTERVALS cache (from contracts pre-population or previous cycle)
+                # Priority 3: contract dict (fundingIntervalHours, direct hours value)
+                # Priority 4: infer from nextFundingTime UTC alignment (now valid since fnd has it)
+                # Priority 5: default 8h (safe fallback for most BingX coins)
+                fnd_interval_h = _norm_interval_h(_pick_float(fnd, ["fundingInterval"]))
                 bingx_interval_h = (
-                    _BINGX_INTERVALS.get(norm_sym, 0)
+                    fnd_interval_h
+                    or _BINGX_INTERVALS.get(norm_sym, 0)
                     or _pick_int(contract, ["fundingIntervalHours", "fundingInterval", "fundingTime", "settleCycle"], default=0)
                 )
                 if not bingx_interval_h:
