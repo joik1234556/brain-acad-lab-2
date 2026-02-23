@@ -72,14 +72,14 @@ SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
 AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
 USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
-DEFAULT_REFRESH_SEC = 1
+DEFAULT_REFRESH_SEC = 30
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
 # Shorter timeout used for background interval-refresh fetches (best-effort, not critical path)
 INTERVAL_FETCH_TIMEOUT = 5
 MAX_BINGX_SYMBOLS = 260
-BINGX_CONCURRENCY = 18
+BINGX_CONCURRENCY = 8
 DEFAULT_EXCH_ENABLED = {"MEXC": True, "Bybit": True, "BingX": True}
 MAX_FREE_SPREAD = 0.02
 SESSION_TTL_SEC = 7 * 24 * 3600
@@ -114,12 +114,19 @@ _MEXC_INTERVALS: Dict[str, int] = {}
 _MEXC_INTERVALS_AT: float = 0.0
 MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refresh hourly
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
-# Populated from /v5/market/instruments-info (fetched once per cycle alongside tickers).
+# Populated from /v5/market/instruments-info (TTL-cached — see BYBIT_INST_TTL).
 _BYBIT_INTERVALS: Dict[str, int] = {}
+# Timestamp of last instruments-info fetch; skip re-fetch when TTL is fresh.
+_BYBIT_INST_AT: float = 0.0
+BYBIT_INST_TTL = 3600  # instruments-info has 1000+ items, changes ≈ monthly — cache 1h
 # Per-symbol BingX funding interval cache, key = norm_sym e.g. "BTCUSDT" → hours.
 # Filled from: contracts endpoint (fundingIntervalHours if present) → per-symbol
 # premiumIndex (when bulk prem is absent for a symbol) → _infer_bingx_interval_h.
 _BINGX_INTERVALS: Dict[str, int] = {}
+# Cached BingX contracts list + fetch timestamp (contracts rarely change — cache 1h).
+_BINGX_CONTRACTS_CACHE: List[dict] = []
+_BINGX_CONTRACTS_AT: float = 0.0
+BINGX_CONTRACTS_TTL = 3600
 
 
 def _get_or_create_auth_key() -> bytes:
@@ -613,15 +620,21 @@ async def load_mexc(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
 
 
 async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
+    global _BYBIT_INST_AT
     out: Dict[str, MarketRow] = {}
     try:
-        # Fetch tickers + instruments-info in parallel.
-        # instruments-info has fundingInterval (minutes) which tickers do NOT include.
+        # Fetch tickers always (live prices/rates).
+        # instruments-info (1000+ items, changes ≈ monthly) only re-fetched when TTL expired.
+        need_inst = (time.time() - _BYBIT_INST_AT) > BYBIT_INST_TTL
         ticker_fut = fetch_json(session, BYBIT_TICKERS, params={"category": "linear"})
-        inst_fut = fetch_json(session, BYBIT_INSTRUMENTS, params={"category": "linear"})
-        ticker_data, inst_data = await asyncio.gather(ticker_fut, inst_fut, return_exceptions=True)
+        if need_inst:
+            inst_fut = fetch_json(session, BYBIT_INSTRUMENTS, params={"category": "linear"})
+            ticker_data, inst_data = await asyncio.gather(ticker_fut, inst_fut, return_exceptions=True)
+        else:
+            ticker_data = await ticker_fut
+            inst_data = None  # use cached _BYBIT_INTERVALS
 
-        # Build symbol → interval_h from instruments-info.
+        # Build symbol → interval_h from instruments-info (only when freshly fetched).
         # fundingInterval is in MINUTES (e.g. 480 = 8h, 240 = 4h, 60 = 1h).
         # _pick_int while-loop divides by 60 while val > 24 and divisible by 60:
         # 480 → 8h, 240 → 4h, 60 → 1h.
@@ -637,6 +650,7 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
                     ih = _pick_int(d, ["fundingInterval", "fundingIntervalHour", "fundingIntervalHours"], default=0)
                     if isym and ih > 0:
                         _BYBIT_INTERVALS[isym] = ih
+            _BYBIT_INST_AT = time.time()
 
         if isinstance(ticker_data, Exception):
             raise ticker_data
@@ -673,11 +687,18 @@ async def load_bybit(session: aiohttp.ClientSession) -> Dict[str, MarketRow]:
 
 
 async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], on_symbol=None) -> Dict[str, MarketRow]:
+    global _BINGX_CONTRACTS_CACHE, _BINGX_CONTRACTS_AT
     out: Dict[str, MarketRow] = {}
     try:
         dbg = {"selected": 0, "from_bulk": 0, "from_fallback": 0, "rejected_no_quote": 0}
-        contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
-        contracts = _as_list(contracts_resp)
+        # Contracts change rarely (new listings ≈ daily at most). Cache for 1 hour.
+        if (time.time() - _BINGX_CONTRACTS_AT) > BINGX_CONTRACTS_TTL or not _BINGX_CONTRACTS_CACHE:
+            contracts_resp = await fetch_json(session, BINGX_CONTRACTS)
+            fetched = _as_list(contracts_resp)
+            if fetched:  # only overwrite cache if the fetch succeeded
+                _BINGX_CONTRACTS_CACHE = fetched
+                _BINGX_CONTRACTS_AT = time.time()
+        contracts = _BINGX_CONTRACTS_CACHE
 
         norm_to_raw: Dict[str, str] = {}
         contract_by_raw: Dict[str, dict] = {}
@@ -1241,13 +1262,18 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _HTTP_SESSION
     await _redis_connect()
+    # Persistent HTTP session — reuses TCP connections across all compute cycles.
+    connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300)
+    _HTTP_SESSION = aiohttp.ClientSession(connector=connector)
     asyncio.create_task(updater_loop())
     asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
     # BingX intervals are inferred from nextFundingTime alignment in load_bingx() — no background task needed
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())
     yield
+    await _HTTP_SESSION.close()
     await _redis_disconnect()
 
 
@@ -1278,6 +1304,9 @@ PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 PAIR_HISTORY_MAX = 300
 LIVE_ROWS: Dict[str, dict] = {}
 _SSE_QUEUES: List[asyncio.Queue] = []
+# Persistent aiohttp session shared across all compute_once() cycles.
+# Created in lifespan() and closed on shutdown to reuse TCP connections.
+_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
 
 # Cache-busting version tag based on startup time.
 # Every server restart (= every deploy) produces a new tag, so browsers
@@ -1473,7 +1502,14 @@ def _broadcast_sse(payload: str) -> None:
 
 async def compute_once() -> Dict[str, Any]:
     started = time.time()
-    async with aiohttp.ClientSession() as session:
+    # Use the persistent session (created in lifespan) — avoids new TCP connections every cycle.
+    # Fall back to a temporary session if somehow called before lifespan (e.g. tests).
+    session = _HTTP_SESSION
+    _owned = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        _owned = True
+    try:
         enabled = CFG.get("enabled", DEFAULT_EXCH_ENABLED)
         mexc_task = asyncio.create_task(load_mexc(session)) if enabled.get("MEXC", True) else None
         bybit_task = asyncio.create_task(load_bybit(session)) if enabled.get("Bybit", True) else None
@@ -1505,6 +1541,9 @@ async def compute_once() -> Dict[str, Any]:
                 _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
 
         bingx = await load_bingx(session, sorted_candidates, on_symbol=on_bingx_symbol) if enabled.get("BingX", True) else {}
+    finally:
+        if _owned:
+            await session.close()
 
     rows_out: List[dict] = []
     all_symbols = set(mexc.keys()) | set(bybit.keys()) | set(bingx.keys())
