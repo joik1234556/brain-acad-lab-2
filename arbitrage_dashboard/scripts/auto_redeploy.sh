@@ -20,7 +20,7 @@ set -euo pipefail
 REPO_DIR="${ARB_REPO_DIR:-/opt/brain-acad-lab-2}"
 BRANCH="${ARB_BRANCH:-copilot/update-coin-refresh-process}"
 SERVICE="${ARB_SERVICE:-arbitrage}"
-VENV="${ARB_VENV:-$REPO_DIR/venv}"
+VENV="${ARB_VENV:-$REPO_DIR/arbitrage_dashboard/.venv}"
 APP_DIR="${ARB_APP_DIR:-$REPO_DIR/arbitrage_dashboard}"
 TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
 
