@@ -1356,6 +1356,11 @@ PAIR_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 PAIR_HISTORY_MAX = 300
 LIVE_ROWS: Dict[str, dict] = {}
 _SSE_QUEUES: List[asyncio.Queue] = []
+# Pre-built /api/data response bodies per access tier (guest / paid / admin).
+# Built once at the end of each compute_once() cycle; served as raw bytes in
+# api_data() without any Redis I/O, JSON parsing, sorting, or serialisation.
+# With N concurrent users, /api/data cost drops from O(N * rows) to O(1).
+_DATA_CACHE: Dict[str, bytes] = {}  # keys: "guest", "paid", "admin"
 # Persistent aiohttp session shared across all compute_once() cycles.
 # Created in lifespan() and closed on shutdown to reuse TCP connections.
 _HTTP_SESSION: Optional[aiohttp.ClientSession] = None
@@ -1563,6 +1568,52 @@ def _broadcast_sse(payload: str) -> None:
             pass  # no running loop (shouldn't happen in normal async context)
 
 
+def _rebuild_data_cache(rows_out: List[dict], cache_meta: dict) -> None:
+    """Pre-build /api/data JSON response bytes for all 3 access tiers.
+
+    Called once at the end of each compute_once() cycle.  api_data() then
+    returns the appropriate pre-built bytes directly — zero Redis I/O, zero
+    JSON parsing, zero sorting, zero serialisation per user request.
+
+    3 tiers:
+      guest — free users and unauthenticated visitors (spread <= MAX_FREE_SPREAD)
+      paid  — users with active subscription (all rows)
+      admin — admin users (all rows + is_admin=True)
+    """
+    sorted_rows = sorted(rows_out, key=_spread_sort_key, reverse=True)
+    updated_at = cache_meta.get("updated_at", time.strftime("%H:%M:%S"))
+    dbg_base = dict(cache_meta.get("dbg", {}))
+
+    for tier in ("guest", "paid", "admin"):
+        if tier == "guest":
+            spread_limit: Optional[float] = MAX_FREE_SPREAD
+            rows: List[dict] = [r for r in sorted_rows if float(r.get("spread") or 0.0) <= spread_limit]
+            is_admin_tier = False
+            is_paid_tier = False
+        elif tier == "paid":
+            spread_limit = None
+            rows = sorted_rows
+            is_admin_tier = False
+            is_paid_tier = True
+        else:  # admin
+            spread_limit = None
+            rows = sorted_rows
+            is_admin_tier = True
+            is_paid_tier = True
+
+        data = {
+            "updated_at": updated_at,
+            "dbg": {**dbg_base, "kept": len(rows)},
+            "rows": rows,
+            "access": {
+                "username": None,           # frontend uses STATE.user.username instead
+                "is_admin": is_admin_tier,
+                "subscription_approved": is_paid_tier,
+                "spread_limit": spread_limit,
+            },
+        }
+        _DATA_CACHE[tier] = json.dumps(data, ensure_ascii=False).encode()
+
 
 async def compute_once() -> Dict[str, Any]:
     started = time.time()
@@ -1660,6 +1711,8 @@ async def compute_once() -> Dict[str, Any]:
         },
     }
     await _rcache_set(cache_meta)
+    # Pre-build /api/data response bytes for all 3 tiers — O(1) serving per user
+    _rebuild_data_cache(rows_out, cache_meta)
 
     return {
         "started_ts": started,
@@ -1871,16 +1924,28 @@ def _mexc_ts_raw_to_ms(ts_raw: Any, now_ms: int) -> int:
 @app.get("/api/data")
 async def api_data(request: Request):
     user = _session_user(request)
-    # Serve from LIVE_ROWS (Redis-backed when available) for real-time per-coin updates
+    # Determine access tier for this user.
+    # Tier is one of "guest" / "paid" / "admin" — maps to a pre-built response
+    # built once per compute cycle in _rebuild_data_cache().
+    # Serving raw bytes is O(1) per request regardless of how many users are connected.
+    is_admin = bool(user and user.get("is_admin"))
+    is_paid  = bool(user and _is_subscription_active(user))
+    tier = "admin" if is_admin else ("paid" if is_paid else "guest")
+
+    cached = _DATA_CACHE.get(tier)
+    if cached:
+        from starlette.responses import Response as _Resp
+        return _Resp(content=cached, media_type="application/json")
+
+    # Fallback: first request before compute_once() has run at least once.
     live = await _rlive_all()
     rows = sorted(live.values(), key=_spread_sort_key, reverse=True)
-    rows, spread_limit, is_admin, is_paid = _limit_rows_for_access(rows, user)
-    # Prefer Redis metadata; fall back to in-memory CACHE
+    rows, spread_limit, _ia, _ip = _limit_rows_for_access(rows, user)
     async with CACHE_LOCK:
         meta = await _rcache_get()
         updated_at = meta.get("updated_at") or CACHE.get("updated_at") or time.strftime("%H:%M:%S")
         dbg = meta.get("dbg") or dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
-    data = {
+    return JSONResponse({
         "updated_at": updated_at,
         "dbg": {**dbg, "kept": len(rows)},
         "rows": rows,
@@ -1890,8 +1955,7 @@ async def api_data(request: Request):
             "subscription_approved": is_paid,
             "spread_limit": spread_limit,
         },
-    }
-    return JSONResponse(data)
+    })
 
 
 @app.get("/api/pair")
