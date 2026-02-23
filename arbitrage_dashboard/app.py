@@ -8,6 +8,7 @@ import os
 import secrets
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1315,6 +1316,14 @@ def _limit_rows_for_access(rows: List[dict], user: Optional[Dict[str, Any]]) -> 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _HTTP_SESSION
+    # Size thread pool for the server CPU count. Default Python pool is
+    # min(32, cpu+4) which can be excessive. 2 vCPU → 4 threads is optimal:
+    # enough parallelism for PBKDF2 auth + _save_users without context-switch
+    # overhead of many threads competing on 2 cores.
+    cpu_count = os.cpu_count() or 2
+    asyncio.get_event_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=cpu_count * 2)
+    )
     await _redis_connect()
     # Persistent HTTP session — reuses TCP connections across all compute cycles.
     connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300)
@@ -2413,6 +2422,16 @@ def run():
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8000"))
 
+    # Use uvloop on Linux/macOS (2-3× faster I/O than default asyncio event loop).
+    # uvicorn[standard] already installs uvloop as a dependency.
+    # timeout_keep_alive=30: keep TCP connections open for 30s per user (default
+    # is 5s; with 20+ concurrent users this reduces connection-setup overhead).
+    try:
+        import uvloop  # noqa: F401
+        loop_policy = "uvloop"
+    except ImportError:
+        loop_policy = "asyncio"
+
     uvicorn.run(
         app,
         host=host,
@@ -2420,6 +2439,8 @@ def run():
         reload=is_dev,
         log_config=None,
         access_log=is_dev,
+        loop=loop_policy,
+        timeout_keep_alive=30,
     )
 
 
