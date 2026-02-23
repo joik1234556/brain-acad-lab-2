@@ -12,11 +12,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+# --- Logging setup: stdout always; optional rotating file via LOG_FILE env var ---
+_log_fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s", datefmt="%H:%M:%S")
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+_stdout_h = logging.StreamHandler(sys.stdout)
+_stdout_h.setFormatter(_log_fmt)
+_root.addHandler(_stdout_h)
+_log_file = os.getenv("LOG_FILE", "")
+if _log_file:
+    from logging.handlers import RotatingFileHandler as _RFH
+    _file_h = _RFH(_log_file, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    _file_h.setFormatter(_log_fmt)
+    _root.addHandler(_file_h)
 logger = logging.getLogger("arb_dashboard")
 
 import aiohttp
@@ -25,6 +33,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -1105,6 +1114,11 @@ _AUTH_RATE: Dict[str, int] = {}  # register+login rate limit: {ip_minute: count}
 def _make_session(username: str) -> str:
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = {"username": username, "expires": time.time() + SESSION_TTL_SEC}
+    # Also store in Redis when available (survives server restarts)
+    if _REDIS is not None:
+        asyncio.get_event_loop().create_task(
+            _REDIS.setex(f"arb:sess:{token}", SESSION_TTL_SEC, username)
+        )
     return token
 
 
@@ -1161,6 +1175,31 @@ def _session_user(request: Request) -> Optional[Dict[str, Any]]:
     return user
 
 
+async def _session_user_async(request: Request) -> Optional[Dict[str, Any]]:
+    """Async variant: checks in-memory SESSIONS first, then Redis on miss."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:]
+    rec = SESSIONS.get(token)
+    if rec:
+        if rec["expires"] < time.time():
+            SESSIONS.pop(token, None)
+        else:
+            return USERS.get(rec["username"])
+    # Fallback: check Redis (handles tokens issued before a server restart)
+    if _REDIS is not None:
+        try:
+            username = await _REDIS.get(f"arb:sess:{token}")
+            if username:
+                # Restore into in-memory cache so next call is instant
+                SESSIONS[token] = {"username": username, "expires": time.time() + SESSION_TTL_SEC}
+                return USERS.get(username)
+        except Exception:
+            pass
+    return None
+
+
 def _is_subscription_active(user: Dict[str, Any]) -> bool:
     """Return True when subscription_approved=True AND not past expiry date (if set)."""
     if not user.get("subscription_approved"):
@@ -1203,6 +1242,18 @@ async def lifespan(_: FastAPI):
 
 ensure_assets()
 app = FastAPI(lifespan=lifespan)
+# CORS: set ALLOWED_ORIGINS env var to restrict to your domain in production.
+# Example: ALLOWED_ORIGINS=https://yourdomain.com
+# Multiple: ALLOWED_ORIGINS=https://a.com,https://b.com
+# Empty/unset (default): allows all origins (ok for a private/internal server)
+_cors_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 app.add_middleware(GZipMiddleware, minimum_size=500)  # ~120KB → ~25KB (-80%)
 app.add_middleware(SecurityHeadersMiddleware)  # nosniff, no-framing, XSS protection
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
@@ -1921,7 +1972,13 @@ async def api_auth_me(request: Request):
 async def api_auth_logout(request: Request):
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        SESSIONS.pop(auth[7:], None)
+        token = auth[7:]
+        SESSIONS.pop(token, None)
+        if _REDIS is not None:
+            try:
+                await _REDIS.delete(f"arb:sess:{token}")
+            except Exception:
+                pass
     return JSONResponse({"ok": True})
 
 
