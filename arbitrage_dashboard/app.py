@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 from models import MarketRow
@@ -1096,12 +1097,51 @@ USERS_LOCK = asyncio.Lock()
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 _BOT_CHECK_RL: Dict[str, int] = {}  # IP-based rate limit counters for /api/bot/check-subscription
 _TG_LINK_CODES: Dict[str, Dict[str, Any]] = {}  # {token: {username, expires_at}}
+# Brute-force login protection: {ip_minute_key: fail_count}
+_LOGIN_FAIL: Dict[str, int] = {}
+_AUTH_RATE: Dict[str, int] = {}  # register+login rate limit: {ip_minute: count}
 
 
 def _make_session(username: str) -> str:
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = {"username": username, "expires": time.time() + SESSION_TTL_SEC}
     return token
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract real client IP, respecting X-Forwarded-For set by nginx."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rl_check(store: Dict[str, int], key: str, limit: int) -> bool:
+    """Rate-limit helper: returns True if request is allowed, False if over limit.
+    Evicts stale minute-keys automatically to prevent unbounded memory growth.
+    """
+    store[key] = store.get(key, 0) + 1
+    # Evict entries from other minutes
+    for k in list(store):
+        if k != key:
+            store.pop(k, None)
+    return store[key] <= limit
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to every HTTP response.
+    Also sets Cache-Control: immutable on static assets (CSS/JS/images).
+    """
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+        # Static assets have a ?v=... cache-buster — safe to cache forever in browser
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 def _session_user(request: Request) -> Optional[Dict[str, Any]]:
@@ -1164,6 +1204,7 @@ async def lifespan(_: FastAPI):
 ensure_assets()
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)  # ~120KB → ~25KB (-80%)
+app.add_middleware(SecurityHeadersMiddleware)  # nosniff, no-framing, XSS protection
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
@@ -1762,7 +1803,12 @@ async def api_auth_pubkey():
 
 
 @app.post("/api/auth/register")
-async def api_auth_register(payload: Dict[str, Any]):
+async def api_auth_register(request: Request, payload: Dict[str, Any]):
+    # Rate-limit: max 10 registrations per minute per IP
+    ip = _get_client_ip(request)
+    if not _rl_check(_AUTH_RATE, f"{ip}:{int(time.time() // 60)}:reg", 10):
+        return JSONResponse({"ok": False, "error": "too_many_requests"}, status_code=429)
+
     # RSA decrypt + PBKDF2 hash are CPU-bound (≥200ms). Run in thread pool
     # so the async event loop is never blocked — table updates keep flowing.
     username, password, tg_username = await asyncio.to_thread(_extract_auth_credentials, payload)
@@ -1784,7 +1830,7 @@ async def api_auth_register(payload: Dict[str, Any]):
             "tg_chat_id": None,
             "created_at": int(time.time()),
         }
-        _save_users(USERS)
+        await asyncio.to_thread(_save_users, USERS)
 
     # Resolve Telegram chat_id in background (non-blocking)
     if tg_username:
@@ -1800,12 +1846,24 @@ async def _resolve_and_store_tg_chat_id(username: str, tg_username: str) -> None
         async with USERS_LOCK:
             if username in USERS:
                 USERS[username]["tg_chat_id"] = chat_id
-                _save_users(USERS)
+                await asyncio.to_thread(_save_users, USERS)
         logger.info("Resolved Telegram chat_id=%s for user=%s (@%s)", chat_id, username, tg_username)
 
 
 @app.post("/api/auth/login")
-async def api_auth_login(payload: Dict[str, Any]):
+async def api_auth_login(request: Request, payload: Dict[str, Any]):
+    ip = _get_client_ip(request)
+    minute_key = f"{ip}:{int(time.time() // 60)}"
+
+    # Rate-limit: max 20 login attempts per minute per IP
+    if not _rl_check(_AUTH_RATE, f"{minute_key}:login", 20):
+        return JSONResponse({"ok": False, "error": "too_many_requests"}, status_code=429)
+
+    # Brute-force: after 5 failures in the current minute, block for 60s
+    fail_key = f"fail:{ip}:{int(time.time() // 60)}"
+    if _LOGIN_FAIL.get(fail_key, 0) >= 5:
+        return JSONResponse({"ok": False, "error": "too_many_failures"}, status_code=429)
+
     # RSA decrypt + PBKDF2 verify are CPU-bound (≥200ms). Run in thread pool.
     username, password, _tg = await asyncio.to_thread(_extract_auth_credentials, payload)
 
@@ -1813,8 +1871,15 @@ async def api_auth_login(payload: Dict[str, Any]):
     if not user or not await asyncio.to_thread(
         _verify_password, password, user.get("salt", ""), user.get("password_hash", "")
     ):
+        _LOGIN_FAIL[fail_key] = _LOGIN_FAIL.get(fail_key, 0) + 1
+        # Evict other-minute fail keys to prevent unbounded growth
+        for k in list(_LOGIN_FAIL):
+            if k != fail_key:
+                _LOGIN_FAIL.pop(k, None)
         return JSONResponse({"ok": False, "error": "bad_login"}, status_code=401)
 
+    # Clear fail counter on successful login
+    _LOGIN_FAIL.pop(fail_key, None)
     token = _make_session(username)
     return JSONResponse(
         {
@@ -1903,7 +1968,8 @@ async def api_admin_subscription(request: Request, payload: Dict[str, Any]):
     async with USERS_LOCK:
         USERS[username]["subscription_approved"] = approved
         USERS[username]["subscription_expires"] = expires_at
-        _save_users(USERS)
+        _save_users(USERS)  # inside USERS_LOCK — sync write is acceptable here; wrapping
+        # in asyncio.to_thread would release the lock mid-write. This write is fast (small JSON).
         # Read notification targets inside lock to avoid race
         chat_id = USERS[username].get("tg_chat_id")
         tg_user = USERS[username].get("tg_username") or ""
@@ -1953,7 +2019,7 @@ async def api_admin_delete_user(request: Request, payload: Dict[str, Any]):
         asyncio.create_task(_tg_send(target, msg))
     async with USERS_LOCK:
         USERS.pop(username, None)
-        _save_users(USERS)
+        await asyncio.to_thread(_save_users, USERS)
     logger.info("Admin %s deleted user %s", admin.get("username"), username)
     return JSONResponse({"ok": True})
 
@@ -2078,7 +2144,7 @@ async def api_bot_link_telegram(request: Request):
         if username not in USERS:
             return JSONResponse({"ok": False, "error": "user not found"}, status_code=404)
         USERS[username]["tg_chat_id"] = chat_id
-        _save_users(USERS)
+        await asyncio.to_thread(_save_users, USERS)
 
     logger.info("Telegram chat_id=%s linked to user=%s via deep-link code", chat_id, username)
 
