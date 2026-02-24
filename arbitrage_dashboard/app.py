@@ -1886,26 +1886,30 @@ def _spread_sort_key(r: dict) -> float:
 async def index(request: Request):
     """Serve the dashboard with server-injected initial snapshot.
 
-    Embedding the current LIVE_ROWS snapshot directly into the HTML lets the
-    browser render the full table on first paint — no extra /api/data round-trip.
+    Uses pre-built guest snapshot from _DATA_CACHE or Redis arb:snap:guest —
+    O(1) per page load regardless of number of users or rows.
     Auth token lives in localStorage (not a cookie), so this page request is
     always guest-level; the JS calls /api/me + /api/data in parallel on load
     to upgrade to the authenticated view within one SSE cycle.
     """
-    live = await _rlive_all()
-    rows = sorted(live.values(), key=_spread_sort_key, reverse=True)
-    # Page request never carries Bearer token (token is in localStorage, not cookies)
-    rows, spread_limit, _is_admin, _is_paid = _limit_rows_for_access(rows, None)
-    async with CACHE_LOCK:
-        meta = await _rcache_get()
-        updated_at = meta.get("updated_at") or CACHE.get("updated_at") or ""
-        dbg = meta.get("dbg") or dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
-    initial_data = json.dumps({
-        "updated_at": updated_at,
-        "dbg": {**dbg, "kept": len(rows)},
-        "rows": rows,
-        "access": {"username": None, "is_admin": False, "subscription_approved": False, "spread_limit": spread_limit},
-    }, ensure_ascii=False)
+    # Use the pre-built guest cache (built once per compute cycle, not per request).
+    # This avoids Redis HGETALL + sort + json.dumps on every page load.
+    snap_bytes = _DATA_CACHE.get("guest")
+    if not snap_bytes and _REDIS is not None:
+        try:
+            snap_bytes = await _REDIS.get(f"{_REDIS_KEY_SNAP}:guest")
+        except Exception:
+            pass
+    if snap_bytes:
+        snap_str = snap_bytes.decode() if isinstance(snap_bytes, bytes) else snap_bytes
+        initial_data = snap_str
+    else:
+        # Nothing ready yet (first startup, <5s after launch): serve empty loading state.
+        initial_data = json.dumps({
+            "updated_at": "", "dbg": {}, "rows": [],
+            "access": {"username": None, "is_admin": False,
+                       "subscription_approved": False, "spread_limit": MAX_FREE_SPREAD},
+        }, ensure_ascii=False)
     initial_config = json.dumps(CFG, ensure_ascii=False)
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
@@ -1919,14 +1923,14 @@ async def index(request: Request):
 async def health():
     """Health-check endpoint for nginx/systemd/uptime monitors.
 
-    Returns HTTP 200 as long as the process is alive.  Nginx and systemd
-    can poll this to detect hangs and auto-restart the service proactively.
+    O(1) — never calls Redis HGETALL.  Reports whether the guest snapshot
+    cache is populated (updated each compute cycle by ws_collector/collector).
     """
-    live = await _rlive_all()
+    snap = _DATA_CACHE.get("guest")
     return JSONResponse({
         "ok": True,
         "uptime_s": int(time.time() - _START_TIME),
-        "rows_cached": len(live),
+        "snapshot_ready": snap is not None,
     })
 
 
@@ -2092,23 +2096,19 @@ async def api_data(request: Request):
         return Response(content=cached, media_type="application/json",
                         headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {"Cache-Control": "no-cache"})
 
-    # Fallback: first request before compute_once() has run at least once.
-    live = await _rlive_all()
-    rows = sorted(live.values(), key=_spread_sort_key, reverse=True)
-    rows, spread_limit, _ia, _ip = _limit_rows_for_access(rows, user)
-    async with CACHE_LOCK:
-        meta = await _rcache_get()
-        updated_at = meta.get("updated_at") or CACHE.get("updated_at") or time.strftime("%H:%M:%S")
-        dbg = meta.get("dbg") or dict(CACHE.get("dbg", {"mexc": 0, "bybit": 0, "bingx": 0, "kept": 0, "took_ms": 0}))
+    # Fallback: snapshot not ready yet (first ~5s after startup before first compute cycle).
+    # Return a lightweight "loading" response — never call _rlive_all() here because that
+    # triggers Redis HGETALL on 600+ keys on every request from every user simultaneously,
+    # causing CPU/Redis spikes during startup and when many users arrive at once.
     return JSONResponse({
-        "updated_at": updated_at,
-        "dbg": {**dbg, "kept": len(rows)},
-        "rows": rows,
+        "updated_at": "",
+        "dbg": {"loading": True},
+        "rows": [],
         "access": {
             "username": user.get("username") if user else None,
             "is_admin": is_admin,
             "subscription_approved": is_paid,
-            "spread_limit": spread_limit,
+            "spread_limit": MAX_FREE_SPREAD,
         },
     })
 
@@ -2136,6 +2136,9 @@ async def graph_page(request: Request):
 
 @app.post("/api/refresh")
 async def api_refresh():
+    if os.getenv("COLLECTOR_ONLY") == "1":
+        return JSONResponse({"ok": False, "error": "collector_only_mode",
+                             "detail": "Data is managed by the collector process. Use ws_collector.py."}, status_code=503)
     data = await compute_once()
     async with CACHE_LOCK:
         CACHE.update(data)
