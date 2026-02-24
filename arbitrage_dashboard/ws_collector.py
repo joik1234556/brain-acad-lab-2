@@ -98,7 +98,7 @@ prices: Dict[str, Dict[str, object]] = {"MEXC": {}, "Bybit": {}, "BingX": {}}
 # _dirty_symbols: symbols that received new WS price data since last snapshot.
 # _all_pairs: persisted spread cache — pair_key → pair_dict.
 # _snapshot_loop processes only dirty symbols on each tick (O(N_dirty) not O(N_all)).
-_dirty_symbols: set = set()
+_dirty_symbols: Set[str] = set()
 _all_pairs: Dict[str, dict] = {}
 
 # Bybit WS: last snapshot state per symbol for delta merging
@@ -668,9 +668,8 @@ async def _snapshot_loop() -> None:
                 if i > 0 and i % 50 == 0:
                     await asyncio.sleep(0)
                 # Remove stale pairs for this symbol before recomputing
-                stale = [k for k in _all_pairs if k.startswith(f"{symbol}|")]
-                for k in stale:
-                    del _all_pairs[k]
+                _all_pairs = {k: v for k, v in _all_pairs.items()
+                              if not k.startswith(f"{symbol}|")}
                 rows = [r for r in (
                     prices["MEXC"].get(symbol),
                     prices["Bybit"].get(symbol),
@@ -694,11 +693,9 @@ async def _snapshot_loop() -> None:
             )
             if len(rows_out) > MAX_ROWS:
                 rows_out = rows_out[:MAX_ROWS]
-                # Trim _all_pairs to cap memory growth
+                # Trim _all_pairs to cap memory growth (dict comprehension, single pass)
                 keep_keys = {r["pair_key"] for r in rows_out}
-                for k in list(_all_pairs):
-                    if k not in keep_keys:
-                        del _all_pairs[k]
+                _all_pairs = {k: v for k, v in _all_pairs.items() if k in keep_keys}
 
             cache_meta = {
                 "updated_at": time.strftime("%H:%M:%S"),
