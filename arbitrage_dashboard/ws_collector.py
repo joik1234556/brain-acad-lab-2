@@ -84,6 +84,7 @@ WS_PING_BYBIT        = float(os.getenv("WS_PING_BYBIT",          "20.0"))  # sec
 WS_PING_BINGX        = float(os.getenv("WS_PING_BINGX",          "20.0"))  # seconds
 MAX_BYBIT_BATCH      = int(os.getenv("MAX_BYBIT_BATCH",           "10"))    # args per subscribe
 MAX_BINGX_SYMS       = int(os.getenv("MAX_BINGX_SYMS",            "200"))   # symbols to subscribe
+MAX_ROWS             = int(os.getenv("MAX_ROWS",                   "300"))   # cap result set
 
 MEXC_WS_URL  = "wss://contract.mexc.com/edge"
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
@@ -92,6 +93,13 @@ BINGX_WS_URL = "wss://open-api-ws.bingx.com/market"
 # ─── In-memory price cache ────────────────────────────────────────────────────
 # prices[exchange][norm_symbol] = MarketRow  (norm_symbol = "BTCUSDT")
 prices: Dict[str, Dict[str, object]] = {"MEXC": {}, "Bybit": {}, "BingX": {}}
+
+# Incremental spread computation:
+# _dirty_symbols: symbols that received new WS price data since last snapshot.
+# _all_pairs: persisted spread cache — pair_key → pair_dict.
+# _snapshot_loop processes only dirty symbols on each tick (O(N_dirty) not O(N_all)).
+_dirty_symbols: set = set()
+_all_pairs: Dict[str, dict] = {}
 
 # Bybit WS: last snapshot state per symbol for delta merging
 _bybit_snap: Dict[str, dict] = {}
@@ -261,6 +269,7 @@ def _on_mexc(raw: str) -> None:
             next_funding_ts=next_ts,
             funding_interval_h=interval_h,
         )
+        _dirty_symbols.add(norm)
         stored += 1
     if stored > 0:
         _mexc_ws_last_msg = time.monotonic()
@@ -374,6 +383,7 @@ def _on_bybit(raw: str) -> None:
         next_funding_ts=next_ts,
         funding_interval_h=interval_h,
     )
+    _dirty_symbols.add(symbol)
 
 
 # ─── BingX WS ────────────────────────────────────────────────────────────────
@@ -571,6 +581,7 @@ def _on_bingx(raw: str) -> None:
         next_funding_ts=next_ts,
         funding_interval_h=interval_h,
     )
+    _dirty_symbols.add(norm)
 
 
 # ─── MEXC REST fallback ───────────────────────────────────────────────────────
@@ -614,6 +625,15 @@ async def _mexc_rest_loop(session: aiohttp.ClientSession) -> None:
 async def _snapshot_loop() -> None:
     """Compute cross-exchange spreads every SNAPSHOT_THROTTLE seconds.
 
+    Incremental design:
+      - First tick: full scan of all symbols (warm-up, builds _all_pairs cache).
+      - Subsequent ticks: ONLY recompute spreads for symbols in _dirty_symbols
+        (those that received new WS price data since the last snapshot).
+        This means when BTC WS msg arrives, only BTC spread is recomputed —
+        not all 600 symbols.  CPU drops from O(N_all) to O(N_dirty) per tick.
+      - Event-loop yields every 50 symbols: login/logout never blocks.
+      - Results capped to MAX_ROWS (default 300) to limit Redis payload size.
+
     Only writes to Redis and broadcasts SSE when the data actually changes
     (ETag comparison).  Skips computation when fewer than 2 exchanges have data.
     """
@@ -632,9 +652,25 @@ async def _snapshot_loop() -> None:
             min_vol    = float(_a.CFG.get("min_vol",    _a.DEFAULT_MIN_VOL_USD))
             min_spread = float(_a.CFG.get("min_spread", _a.DEFAULT_MIN_SPREAD))
 
-            all_symbols = set(prices["MEXC"]) | set(prices["Bybit"]) | set(prices["BingX"])
-            rows_out: list = []
-            for symbol in all_symbols:
+            # First tick: full scan (warm-up). Subsequent ticks: only dirty symbols.
+            if not _all_pairs:
+                symbols_to_compute = (
+                    set(prices["MEXC"]) | set(prices["Bybit"]) | set(prices["BingX"])
+                )
+                _dirty_symbols.clear()   # discard accumulated pre-first-tick dirty
+            else:
+                # Atomically snapshot and clear the dirty set
+                symbols_to_compute = _dirty_symbols.copy()
+                _dirty_symbols.clear()
+
+            for i, symbol in enumerate(symbols_to_compute):
+                # Yield to event loop every 50 symbols — login/logout never blocks
+                if i > 0 and i % 50 == 0:
+                    await asyncio.sleep(0)
+                # Remove stale pairs for this symbol before recomputing
+                stale = [k for k in _all_pairs if k.startswith(f"{symbol}|")]
+                for k in stale:
+                    del _all_pairs[k]
                 rows = [r for r in (
                     prices["MEXC"].get(symbol),
                     prices["Bybit"].get(symbol),
@@ -648,7 +684,21 @@ async def _snapshot_loop() -> None:
                         continue
                     p["symbol"] = symbol
                     p["pair_key"] = f"{symbol}|{p['buy_ex']}|{p['sell_ex']}"
-                    rows_out.append(p)
+                    _all_pairs[p["pair_key"]] = p
+
+            # Sort all pairs by spread desc, cap to MAX_ROWS
+            rows_out = sorted(
+                _all_pairs.values(),
+                key=lambda r: r.get("spread", 0),
+                reverse=True,
+            )
+            if len(rows_out) > MAX_ROWS:
+                rows_out = rows_out[:MAX_ROWS]
+                # Trim _all_pairs to cap memory growth
+                keep_keys = {r["pair_key"] for r in rows_out}
+                for k in list(_all_pairs):
+                    if k not in keep_keys:
+                        del _all_pairs[k]
 
             cache_meta = {
                 "updated_at": time.strftime("%H:%M:%S"),
@@ -683,8 +733,10 @@ async def _snapshot_loop() -> None:
                 except Exception as pub_exc:
                     logger.warning("[snapshot] Redis PUBLISH failed: %s", pub_exc)
                 logger.debug(
-                    "[snapshot] MEXC:%d Bybit:%d BingX:%d pairs:%d",
+                    "[snapshot] MEXC:%d Bybit:%d BingX:%d pairs:%d dirty:%d took:%dms",
                     n_mexc, n_bybit, n_bingx, len(rows_out),
+                    len(symbols_to_compute),
+                    int((time.monotonic() - t0) * 1000),
                 )
 
         except Exception as exc:
