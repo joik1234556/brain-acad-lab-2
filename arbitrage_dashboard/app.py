@@ -2107,20 +2107,24 @@ async def api_data(request: Request):
                         headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {"Cache-Control": "no-cache"})
 
     # Fallback: snapshot not ready yet (first ~5s after startup before first compute cycle).
-    # Return a lightweight "loading" response — never call _rlive_all() here because that
-    # triggers Redis HGETALL on 600+ keys on every request from every user simultaneously,
-    # causing CPU/Redis spikes during startup and when many users arrive at once.
-    return JSONResponse({
-        "updated_at": "",
-        "dbg": {"loading": True},
-        "rows": [],
-        "access": {
-            "username": user.get("username") if user else None,
-            "is_admin": is_admin,
-            "subscription_approved": is_paid,
-            "spread_limit": MAX_FREE_SPREAD,
+    # HTTP 202 Accepted: client should retry. JS checks resp.status===202 and returns
+    # early — does NOT overwrite STATE.data with an empty placeholder.
+    # Never call _rlive_all() here (would trigger Redis HGETALL on 600+ keys per request).
+    return JSONResponse(
+        {
+            "updated_at": "",
+            "dbg": {"loading": True},
+            "rows": [],
+            "access": {
+                "username": user.get("username") if user else None,
+                "is_admin": is_admin,
+                "subscription_approved": is_paid,
+                "spread_limit": MAX_FREE_SPREAD,
+            },
         },
-    })
+        status_code=202,
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.get("/api/pair")

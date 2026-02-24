@@ -380,9 +380,14 @@ async function refreshData(){
     if(_lastDataEtag)hdrs['If-None-Match']=_lastDataEtag;
     const resp=await fetch('/api/data',{cache:'no-cache',headers:hdrs});
     if(resp.status===304)return;  // data unchanged → skip re-render
+    if(resp.status===202)return;  // server loading, keep existing STATE.data
     const etag=resp.headers.get('etag');
     if(etag)_lastDataEtag=etag;
-    STATE.data=await resp.json();
+    const _d=await resp.json();
+    // Don't replace real data with a loading placeholder:
+    // if STATE.data already has rows, keep them until real new data arrives.
+    if(_d&&_d.dbg&&_d.dbg.loading&&STATE.data&&STATE.data.rows&&STATE.data.rows.length>0)return;
+    STATE.data=_d;
   }catch(e){console.error('refreshData failed',e);return;}
   render();
 }
@@ -464,8 +469,7 @@ async function boot(){
   }
   connectSSE();
   // Fallback: poll /api/data when SSE is not active (e.g. proxy drops connection).
-  // Interval matches server refresh cycle (DEFAULT_REFRESH_SEC=30) so we don't
-  // hammer the server with requests that return stale data anyway.
-  setInterval(()=>{if(!_sseActive)safeRefresh();},30000);
+  // 5s interval: faster recovery when collector starts after page load.
+  setInterval(()=>{if(!_sseActive)safeRefresh();},5000);
 }
 boot();
