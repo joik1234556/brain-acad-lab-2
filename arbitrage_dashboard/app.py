@@ -41,7 +41,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
@@ -2004,7 +2004,9 @@ def _mexc_ts_raw_to_ms(ts_raw: Any, now_ms: int) -> int:
 
 @app.get("/api/data")
 async def api_data(request: Request):
-    user = _session_user(request)
+    # Use async variant to check Redis for sessions not yet in local memory
+    # (critical in COLLECTOR_ONLY mode where API restarts with empty SESSIONS dict).
+    user = await _session_user_async(request)
     # Determine access tier for this user.
     # Tier is one of "guest" / "paid" / "admin" — maps to a pre-built response
     # built once per compute cycle in _rebuild_data_cache().
@@ -2023,21 +2025,17 @@ async def api_data(request: Request):
                 etag = await _REDIS.get(f"{_REDIS_KEY_SNAP}:etag:{tier}") or ""
                 snap_bytes = snap if isinstance(snap, bytes) else snap.encode()
                 if etag and request.headers.get("If-None-Match") == etag:
-                    from starlette.responses import Response as _Resp
-                    return _Resp(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-                from starlette.responses import Response as _Resp
-                return _Resp(content=snap_bytes, media_type="application/json",
-                             headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {})
+                    return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+                return Response(content=snap_bytes, media_type="application/json",
+                                headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {})
         except Exception:
             pass  # fall through to live fallback
     if cached:
         etag = _DATA_ETAG.get(tier, "")
         if etag and request.headers.get("If-None-Match") == etag:
-            from starlette.responses import Response as _Resp
-            return _Resp(status_code=304, headers={"ETag": etag})
-        from starlette.responses import Response as _Resp
-        return _Resp(content=cached, media_type="application/json",
-                     headers={"ETag": etag} if etag else {})
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(content=cached, media_type="application/json",
+                        headers={"ETag": etag} if etag else {})
 
     # Fallback: first request before compute_once() has run at least once.
     live = await _rlive_all()
