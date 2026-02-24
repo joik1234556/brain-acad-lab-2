@@ -109,6 +109,19 @@ _a = None  # type: ignore[assignment]
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
+# Maximum abs(log10(price)) — prices outside this range are likely wrong field
+# picks (e.g. volume picked instead of price).
+# Real futures prices: BTC ~$65k (log10≈4.8), SLP ~0.0005 (log10≈-3.3),
+# BTT ~8.8e-7 (log10≈-6.06). Volumes for low-price tokens: 8M+ (log10≈6.9).
+# Threshold 6.5 accepts [3e-7, 3e6] — rejects 8,361,110 (vol) but keeps BTT.
+_PRICE_MAX_LOG10 = 6.5
+
+
+def _price_ok(p: float) -> bool:
+    """Return True iff p is a plausible price (finite, positive, reasonable magnitude)."""
+    return math.isfinite(p) and p > 0 and abs(math.log10(p)) <= _PRICE_MAX_LOG10
+
+
 def _backoff(attempt: int) -> float:
     """Exponential backoff: 1, 2, 4, 8, 16, 32, 60 seconds."""
     return min(MAX_RECONNECT_DELAY, 1.0 * (2 ** min(attempt, 6)))
@@ -451,11 +464,34 @@ def _on_bingx(raw: str) -> None:
         return
 
     if stream == "ticker":
-        # c=last, b=bid, a=ask, q=quote volume (USD)
+        # c=last, b=bid price, B=bid qty (do NOT use B as price), a=ask price, A=ask qty
+        raw_bid  = _a.to_float(data.get("b") or data.get("bidPrice"))
+        raw_ask  = _a.to_float(data.get("a") or data.get("askPrice"))
+        raw_last = _a.to_float(data.get("c") or data.get("lastPrice"))
+
+        # Sanity: reject if any finite price has abs(log10) > 8 (e.g. volume picked as price)
+        for _val, _fname in ((raw_bid, "bid"), (raw_ask, "ask"), (raw_last, "last")):
+            if math.isfinite(_val) and _val > 0 and not _price_ok(_val):
+                logger.warning(
+                    "[BingX WS] Suspicious %s price=%.6g for %s (likely wrong field) — discarding. raw=%.200s",
+                    _fname, _val, norm, raw,
+                )
+                return
+
+        # When bid/ask are absent or zero, fall back to last price as mid approximation.
+        # This is common for low-volume symbols where BingX omits b/a from ticker.
+        if not _price_ok(raw_bid) and _price_ok(raw_last):
+            raw_bid = raw_last
+        if not _price_ok(raw_ask) and _price_ok(raw_last):
+            raw_ask = raw_last
+
+        logger.debug("[BingX ticker] sym=%s last=%.8g bid=%.8g ask=%.8g raw=%s",
+                     norm, raw_last, raw_bid, raw_ask, data)
+
         _bingx_price[norm] = {
-            "bid":  _a.to_float(data.get("b") or data.get("bidPrice")),
-            "ask":  _a.to_float(data.get("a") or data.get("askPrice")),
-            "last": _a.to_float(data.get("c") or data.get("lastPrice")),
+            "bid":  raw_bid,
+            "ask":  raw_ask,
+            "last": raw_last,
             "vol":  _a.to_float(data.get("q") or data.get("quoteVolume")),
         }
     elif stream == "markPrice":

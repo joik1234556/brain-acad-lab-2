@@ -449,7 +449,7 @@ async function boot(){
   function connectSSE(){
     if(typeof EventSource==='undefined')return;
     const src=new EventSource('/events');
-    src.onopen=()=>{_sseActive=true;};
+    src.onopen=()=>{_sseActive=true;safeRefresh();};
     src.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')safeRefresh();}catch(_e){}};
     src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
   }

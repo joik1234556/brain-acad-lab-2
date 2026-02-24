@@ -921,6 +921,15 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     dbg["rejected_no_quote"] += 1
                     return None
 
+                # Sanity: reject obviously wrong bid/ask (e.g. volume picked as price).
+                # abs(log10(price)) > 6.5 rejects prices above ~$3M or below ~3e-7 —
+                # unrealistic for USDT perpetual futures; catches volume-as-price bugs.
+                if (math.isfinite(bid) and bid > 0 and abs(math.log10(bid)) > 6.5) or \
+                   (math.isfinite(ask) and ask > 0 and abs(math.log10(ask)) > 6.5):
+                    logger.debug("[BingX REST] Suspicious bid=%.6g ask=%.6g for %s — discarding",
+                                 bid, ask, norm_sym)
+                    return None
+
                 if used_fallback:
                     dbg["from_fallback"] += 1
                 else:
@@ -2117,7 +2126,11 @@ async def sse_stream(request: Request):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
