@@ -469,7 +469,8 @@ def _on_bingx(raw: str) -> None:
         raw_ask  = _a.to_float(data.get("a") or data.get("askPrice"))
         raw_last = _a.to_float(data.get("c") or data.get("lastPrice"))
 
-        # Sanity: reject if any finite price has abs(log10) > 8 (e.g. volume picked as price)
+        # Sanity: reject if any finite price has abs(log10) > _PRICE_MAX_LOG10=6.5
+        # (e.g. volume picked as price)
         for _val, _fname in ((raw_bid, "bid"), (raw_ask, "ask"), (raw_last, "last")):
             if math.isfinite(_val) and _val > 0 and not _price_ok(_val):
                 logger.warning(
@@ -485,8 +486,9 @@ def _on_bingx(raw: str) -> None:
         if not _price_ok(raw_ask) and _price_ok(raw_last):
             raw_ask = raw_last
 
-        logger.debug("[BingX ticker] sym=%s last=%.8g bid=%.8g ask=%.8g raw=%s",
-                     norm, raw_last, raw_bid, raw_ask, data)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[BingX ticker] sym=%s last=%.8g bid=%.8g ask=%.8g raw=%s",
+                         norm, raw_last, raw_bid, raw_ask, data)
 
         _bingx_price[norm] = {
             "bid":  raw_bid,
