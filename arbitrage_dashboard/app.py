@@ -2157,12 +2157,13 @@ async def sse_stream(request: Request):
 
     async def generate():
         try:
+            yield ": connected\n\n"  # immediate first byte — confirms stream is live
             while True:
                 try:
-                    payload = await asyncio.wait_for(q.get(), timeout=25.0)
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
                     yield f"data: {payload}\n\n"
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"  # keepalive comment
+                    yield ": ping\n\n"  # keepalive comment (every 15s)
         finally:
             try:
                 _SSE_QUEUES.remove(q)
