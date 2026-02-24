@@ -1977,10 +1977,10 @@ async def api_data(request: Request):
             snap = await _REDIS.get(f"{_REDIS_KEY_SNAP}:{tier}")
             if snap:
                 etag = await _REDIS.get(f"{_REDIS_KEY_SNAP}:etag:{tier}") or ""
+                snap_bytes = snap if isinstance(snap, bytes) else snap.encode()
                 if etag and request.headers.get("If-None-Match") == etag:
                     from starlette.responses import Response as _Resp
                     return _Resp(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-                snap_bytes = snap if isinstance(snap, bytes) else snap.encode()
                 from starlette.responses import Response as _Resp
                 return _Resp(content=snap_bytes, media_type="application/json",
                              headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {})
