@@ -384,9 +384,9 @@ async function refreshData(){
     const etag=resp.headers.get('etag');
     if(etag)_lastDataEtag=etag;
     const _d=await resp.json();
-    // Don't replace real data with a loading placeholder:
-    // if STATE.data already has rows, keep them until real new data arrives.
-    if(_d&&_d.dbg&&_d.dbg.loading&&STATE.data&&STATE.data.rows&&STATE.data.rows.length>0)return;
+    // Never store a loading placeholder — server returns 202 for that case (handled above),
+    // but skip as a safety net if somehow a loading payload arrives on a 200 response.
+    if(_d&&_d.dbg&&_d.dbg.loading)return;
     STATE.data=_d;
   }catch(e){console.error('refreshData failed',e);return;}
   render();
@@ -438,9 +438,9 @@ async function boot(){
     apiGet('/api/data'),       // get fresh data with auth token (full rows for logged-in users)
     apiGet('/api/assets'),     // logos + sounds
   ]);
-  // Accept any valid API response (even empty rows) — only skip if it's a loading
-  // placeholder that would overwrite already-loaded rows (mirrors refreshData logic).
-  if(_data.status==='fulfilled'&&_data.value){if(!(_data.value.dbg&&_data.value.dbg.loading&&STATE.data&&(STATE.data.rows||[]).length>0))STATE.data=_data.value;}
+  // Accept real data (even empty rows); skip 202 loading placeholders — SSE/polling will
+  // update STATE.data once the server has real data ready (even if rows are empty).
+  if(_data.status==='fulfilled'&&_data.value&&!(_data.value.dbg&&_data.value.dbg.loading))STATE.data=_data.value;
   if(_assets.status==='fulfilled'&&_assets.value)STATE.assets=_assets.value||{logos:{},sounds:[]};
 
   const ss=document.getElementById('soundSel'); ss.innerHTML='';
@@ -470,8 +470,10 @@ async function boot(){
     src.onerror=()=>{_sseActive=false;_sseSetStatus('🔴 Reconnecting...');src.close();setTimeout(connectSSE,2000);};
   }
   connectSSE();
-  // Fallback: poll /api/data when SSE is not active (e.g. proxy drops connection).
-  // 5s interval: faster recovery when collector starts after page load.
-  setInterval(()=>{if(!_sseActive)safeRefresh();},5000);
+  // Poll /api/data every 5s as a safety net regardless of SSE state.
+  // When SSE is active and working, ETags (304) prevent unnecessary re-renders.
+  // When SSE is connected but the server isn't pushing "upd" events (e.g. COLLECTOR_ONLY
+  // mode, collector process restarting), this ensures the UI recovers automatically.
+  setInterval(()=>safeRefresh(),5000);
 }
 boot();
