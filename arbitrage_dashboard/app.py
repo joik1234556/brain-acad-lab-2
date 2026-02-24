@@ -1388,7 +1388,7 @@ async def lifespan(_: FastAPI):
     # _redis_sse_subscriber only needed in COLLECTOR_ONLY mode: in full mode, _broadcast_sse puts
     # messages directly into _SSE_QUEUES (no Redis round-trip needed; starting it in full mode
     # would cause every SSE client to receive each update TWICE — once direct, once via Redis).
-    if _REDIS is not None and os.getenv("COLLECTOR_ONLY"):
+    if _REDIS is not None and os.getenv("COLLECTOR_ONLY") == "1":
         asyncio.create_task(_redis_sse_subscriber())
     yield
     await _HTTP_SESSION.close()
