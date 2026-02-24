@@ -73,7 +73,8 @@ SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
 AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
 USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
-DEFAULT_REFRESH_SEC = int(os.getenv("REFRESH_SEC", "3"))  # env var allows per-deployment override
+REFRESH_SEC = int(os.getenv("REFRESH_SEC", "3"))       # collector cycle interval (seconds); override via env
+CYCLE_WARN_MS = 2000                                    # log warning when compute_once exceeds this
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
@@ -529,7 +530,7 @@ async def _mexc_intervals_refresher() -> None:
             if cached_json:
                 loaded = json.loads(cached_json)
                 if isinstance(loaded, dict):
-                    _MEXC_INTERVALS.update({k: int(v) for k, v in loaded.items() if int(v) > 0})
+                    _MEXC_INTERVALS.update({k: iv for k, v in loaded.items() if (iv := int(v)) > 0})
                     logger.info("[MEXC] %d intervals loaded from Redis arb:mexc:intervals", len(_MEXC_INTERVALS))
         except Exception as exc:
             logger.debug("[MEXC] Redis interval load failed: %s", exc)
@@ -1080,7 +1081,7 @@ async def _push_pairs_to_live_rows(
 
 def load_config() -> Dict[str, Any]:
     defaults = {
-        "refresh_sec": DEFAULT_REFRESH_SEC,
+        "refresh_sec": REFRESH_SEC,
         "min_vol": DEFAULT_MIN_VOL_USD,
         "min_spread": DEFAULT_MIN_SPREAD,
         "enabled": dict(DEFAULT_EXCH_ENABLED),
@@ -1779,8 +1780,8 @@ async def compute_once() -> Dict[str, Any]:
         "Cycle: %d ms | MEXC: %d | Bybit: %d | BingX: %d | pairs: %d",
         took_ms, len(mexc), len(bybit), len(bingx), len(rows_out),
     )
-    if took_ms > 2000:
-        logger.warning("Cycle > 2000 ms: %d ms — consider increasing REFRESH_SEC", took_ms)
+    if took_ms > CYCLE_WARN_MS:
+        logger.warning("Cycle > %d ms: %d ms — consider increasing REFRESH_SEC", CYCLE_WARN_MS, took_ms)
 
     return {
         "started_ts": started,
@@ -1802,7 +1803,7 @@ async def updater_loop():
         except Exception:
             logger.exception("updater_loop: compute_once raised an error")
         elapsed = max(0.0, time.time() - cycle_started)
-        wait_for = max(0.05, float(CFG.get("refresh_sec", DEFAULT_REFRESH_SEC)) - elapsed)
+        wait_for = max(0.05, float(CFG.get("refresh_sec", REFRESH_SEC)) - elapsed)
         await asyncio.sleep(wait_for)
 
 
