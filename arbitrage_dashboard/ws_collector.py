@@ -96,9 +96,10 @@ prices: Dict[str, Dict[str, object]] = {"MEXC": {}, "Bybit": {}, "BingX": {}}
 # Bybit WS: last snapshot state per symbol for delta merging
 _bybit_snap: Dict[str, dict] = {}
 
-# BingX: separate dicts for price data and funding data (from different streams)
+# BingX: separate dicts for price data, funding data, and mark price
 _bingx_price: Dict[str, dict] = {}   # norm → {bid, ask, last, vol}
 _bingx_fund:  Dict[str, dict] = {}   # norm → {fund_rate, next_ts}
+_bingx_mark:  Dict[str, float] = {}  # norm → mark_price (from @markPrice stream)
 
 # BingX raw symbols list — populated during bootstrap in main()
 _bingx_raw_symbols: List[str] = []
@@ -464,39 +465,59 @@ def _on_bingx(raw: str) -> None:
         return
 
     if stream == "ticker":
-        # c=last, b=bid price, B=bid qty (do NOT use B as price), a=ask price, A=ask qty
-        raw_bid  = _a.to_float(data.get("b") or data.get("bidPrice"))
-        raw_ask  = _a.to_float(data.get("a") or data.get("askPrice"))
-        raw_last = _a.to_float(data.get("c") or data.get("lastPrice"))
+        # BingX @ticker only gives c (last price). Fields b/a may contain volume or
+        # be absent — never use them as price.  We set bid=ask=last.
+        raw_last = _a.to_float(data.get("c") or data.get("lastPrice") or 0)
 
-        # Sanity: reject if any finite price has abs(log10) > _PRICE_MAX_LOG10=6.5
-        # (e.g. volume picked as price)
-        for _val, _fname in ((raw_bid, "bid"), (raw_ask, "ask"), (raw_last, "last")):
-            if math.isfinite(_val) and _val > 0 and not _price_ok(_val):
-                logger.warning(
-                    "[BingX WS] Suspicious %s price=%.6g for %s (likely wrong field) — discarding. raw=%.200s",
-                    _fname, _val, norm, raw,
+        # Determine the price to use: last from ticker, then mark from @markPrice stream
+        if _price_ok(raw_last):
+            price = raw_last
+        else:
+            # c=0 or out-of-range — try markPrice fallback
+            price = _bingx_mark.get(norm, 0.0)
+            if not _price_ok(price):
+                # No valid price yet — wait for @markPrice event (cold start, normal)
+                logger.debug(
+                    "[BingX ticker] sym=%s: c=%.6g not ok, no markPrice yet — skipping",
+                    norm, raw_last,
                 )
+                # Preserve existing vol so markPrice handler can combine later
+                vol = _a.to_float(data.get("q") or data.get("quoteVolume") or 0)
+                if vol > 0:
+                    existing = _bingx_price.get(norm, {})
+                    _bingx_price[norm] = {**existing, "vol": vol}
                 return
-
-        # When bid/ask are absent or zero, fall back to last price as mid approximation.
-        # This is common for low-volume symbols where BingX omits b/a from ticker.
-        if not _price_ok(raw_bid) and _price_ok(raw_last):
-            raw_bid = raw_last
-        if not _price_ok(raw_ask) and _price_ok(raw_last):
-            raw_ask = raw_last
+            # Warn only if c was positive but out-of-range (likely wrong field bug)
+            if math.isfinite(raw_last) and raw_last > 0:
+                logger.warning(
+                    "[BingX WS] sym=%s: c=%.6g rejected by _price_ok — using markPrice=%.6g",
+                    norm, raw_last, price,
+                )
 
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[BingX ticker] sym=%s last=%.8g bid=%.8g ask=%.8g raw=%s",
-                         norm, raw_last, raw_bid, raw_ask, data)
+            logger.debug("[BingX ticker] sym=%s last=%.8g bid=ask=%.8g raw=%s",
+                         norm, raw_last, price, data)
 
         _bingx_price[norm] = {
-            "bid":  raw_bid,
-            "ask":  raw_ask,
-            "last": raw_last,
-            "vol":  _a.to_float(data.get("q") or data.get("quoteVolume")),
+            "bid":  price,
+            "ask":  price,
+            "last": raw_last if _price_ok(raw_last) else price,
+            "vol":  _a.to_float(data.get("q") or data.get("quoteVolume") or 0),
         }
     elif stream == "markPrice":
+        # Extract mark price and store as fallback for when c=0 in ticker
+        mark = _a.to_float(data.get("p") or data.get("markPrice") or 0)
+        if _price_ok(mark):
+            _bingx_mark[norm] = mark
+            # Bootstrap price entry if ticker hasn't sent a valid price yet
+            existing = _bingx_price.get(norm)
+            if existing is None or not _price_ok(existing.get("bid", 0.0)):
+                _bingx_price[norm] = {
+                    "bid":  mark,
+                    "ask":  mark,
+                    "last": mark,
+                    "vol":  (existing or {}).get("vol", math.nan),
+                }
         _bingx_fund[norm] = {
             "fund_rate": _a.to_float(data.get("fundingRate") or data.get("r")),
             "next_ts":   _a._pick_ts(data, ["nextFundingTime", "nextSettleTime"]),
