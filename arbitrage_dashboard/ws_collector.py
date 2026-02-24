@@ -520,7 +520,8 @@ def _on_bingx(raw: str) -> None:
                 }
         _bingx_fund[norm] = {
             "fund_rate": _a.to_float(data.get("fundingRate") or data.get("r")),
-            "next_ts":   _a._pick_ts(data, ["nextFundingTime", "nextSettleTime"]),
+            # BingX WS uses "T" for next funding timestamp (ms); REST uses "nextFundingTime"
+            "next_ts":   _a._pick_ts(data, ["nextFundingTime", "nextSettleTime", "T"]),
         }
     else:
         return  # unknown stream
@@ -709,7 +710,43 @@ async def main() -> None:
     except Exception as exc:
         logger.warning("[Bootstrap] BingX REST failed: %s", exc)
 
-    # 3. MEXC intervals: try Redis warm-start first (avoids 200-symbol REST loop)
+    # 3. BingX funding rates — REST bootstrap so F Spread (adj) shows immediately
+    #    (WS @markPrice stream populates _bingx_fund on-the-fly, but only after
+    #     the first markPrice event per symbol arrives, which can take 30+ seconds.
+    #     The bulk fundingRate endpoint returns all symbols at once in ~200ms.)
+    logger.info("[Bootstrap] Loading BingX funding rates...")
+    try:
+        fund_resp = await _a.fetch_json(session, _a.BINGX_FUNDING_RATE)
+        fund_data: list = (
+            fund_resp if isinstance(fund_resp, list)
+            else (fund_resp.get("data") if isinstance(fund_resp, dict) else [])
+            or []
+        )
+        bootstrapped = 0
+        for item in fund_data:
+            if not isinstance(item, dict):
+                continue
+            raw_sym = str(item.get("symbol") or "")
+            norm = _bingx_raw_to_norm(raw_sym)
+            if norm is None:
+                continue
+            fr = _a.to_float(item.get("fundingRate") or item.get("lastFundingRate"))
+            nts = _a._pick_ts(item, ["nextFundingTime", "nextSettleTime", "T"])
+            _bingx_fund[norm] = {"fund_rate": fr, "next_ts": nts}
+            # Also store interval from REST if not already known
+            ih = _a._pick_int(
+                item,
+                ["fundingIntervalHours", "fundingInterval", "settleCycle"],
+                default=0,
+            )
+            if ih > 0 and norm not in _a._BINGX_INTERVALS:
+                _a._BINGX_INTERVALS[norm] = ih
+            bootstrapped += 1
+        logger.info("[Bootstrap] BingX funding: %d symbols pre-loaded", bootstrapped)
+    except Exception as exc:
+        logger.warning("[Bootstrap] BingX funding REST failed: %s", exc)
+
+    # 4. MEXC intervals: try Redis warm-start first (avoids 200-symbol REST loop)
     asyncio.create_task(_a._mexc_intervals_refresher(), name="mexc-intervals")
     logger.info("[Bootstrap] MEXC intervals refresher started (first run in 25s)")
 

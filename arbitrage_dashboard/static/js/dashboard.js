@@ -447,6 +447,8 @@ async function boot(){
 
   let _sseActive=false;
   let _refreshInFlight=false;
+  const _sseEl=document.getElementById('sseIndicator');
+  function _sseSetStatus(s){if(_sseEl)_sseEl.textContent=s;}
   async function safeRefresh(){
     if(_refreshInFlight)return;
     _refreshInFlight=true;
@@ -454,10 +456,11 @@ async function boot(){
   }
   function connectSSE(){
     if(typeof EventSource==='undefined')return;
+    _sseSetStatus('🔄 Connecting...');
     const src=new EventSource('/events');
-    src.onopen=()=>{_sseActive=true;safeRefresh();};
+    src.onopen=()=>{_sseActive=true;_sseSetStatus('🟢 Live');safeRefresh();};
     src.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.t==='upd')safeRefresh();}catch(_e){}};
-    src.onerror=()=>{_sseActive=false;src.close();setTimeout(connectSSE,8000);};
+    src.onerror=()=>{_sseActive=false;_sseSetStatus('🔴 Reconnecting...');src.close();setTimeout(connectSSE,2000);};
   }
   connectSSE();
   // Fallback: poll /api/data when SSE is not active (e.g. proxy drops connection).
