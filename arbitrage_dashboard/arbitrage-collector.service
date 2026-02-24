@@ -12,6 +12,7 @@ Restart=always
 RestartSec=5
 Environment=ENV=production
 Environment=REDIS_URL=redis://localhost:6379/0
+Environment=REFRESH_SEC=3
 Environment=TELEGRAM_BOT_TOKEN=ЗАМЕНИТЕ_НА_ТОКЕН_БОТА
 Environment=TELEGRAM_BOT_USERNAME=arbitrageinsights_bot
 

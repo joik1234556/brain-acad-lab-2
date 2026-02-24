@@ -73,7 +73,7 @@ SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 CONFIG_PATH = os.path.join(BASE_DIR, "arb_dashboard_config.json")
 AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
 USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
-DEFAULT_REFRESH_SEC = 30
+DEFAULT_REFRESH_SEC = int(os.getenv("REFRESH_SEC", "3"))  # env var allows per-deployment override
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
@@ -520,6 +520,20 @@ async def _mexc_intervals_refresher() -> None:
     # 200 concurrent HTTP requests to MEXC to compete with the first data cycle
     # and all early login/logout requests, making auth feel frozen for 20-30s.
     await asyncio.sleep(25)
+
+    # Step 0: try to warm _MEXC_INTERVALS from Redis on first run
+    # (survives server restarts — TTL 24h means intervals are always available immediately)
+    if _REDIS is not None and not _MEXC_INTERVALS:
+        try:
+            cached_json = await _REDIS.get(_REDIS_KEY_MEXC_INT)
+            if cached_json:
+                loaded = json.loads(cached_json)
+                if isinstance(loaded, dict):
+                    _MEXC_INTERVALS.update({k: int(v) for k, v in loaded.items() if int(v) > 0})
+                    logger.info("[MEXC] %d intervals loaded from Redis arb:mexc:intervals", len(_MEXC_INTERVALS))
+        except Exception as exc:
+            logger.debug("[MEXC] Redis interval load failed: %s", exc)
+
     while True:
         try:
             # Reuse shared persistent session when available (avoids competing
@@ -579,6 +593,13 @@ async def _mexc_intervals_refresher() -> None:
                     still_missing_count = sum(1 for s in all_syms if s not in _MEXC_INTERVALS)
                     logger.info("[MEXC] interval refresh done (%d total cached, %d still missing)",
                                 len(_MEXC_INTERVALS), still_missing_count)
+                    # Persist to Redis (TTL 24h) so next server restart doesn't need to refetch
+                    if _REDIS is not None and _MEXC_INTERVALS:
+                        try:
+                            await _REDIS.set(_REDIS_KEY_MEXC_INT, json.dumps(_MEXC_INTERVALS), ex=86400)
+                            logger.debug("[MEXC] %d intervals saved to Redis arb:mexc:intervals", len(_MEXC_INTERVALS))
+                        except Exception as exc:
+                            logger.debug("[MEXC] Redis interval save failed: %s", exc)
             finally:
                 if _own_session is not None:
                     await _own_session.close()
@@ -1401,6 +1422,7 @@ _REDIS_KEY_LIVE = "arb:live"
 _REDIS_KEY_CACHE_META = "arb:cache_meta"
 _REDIS_CHANNEL_SSE = "arb:sse"
 _REDIS_KEY_SNAP = "arb:snap"        # arb:snap:{tier} → pre-built JSON bytes
+_REDIS_KEY_MEXC_INT = "arb:mexc:intervals"  # MEXC per-symbol funding intervals (TTL 24h)
 _REDIS: Optional[Any] = None  # redis.asyncio.Redis instance, or None
 
 
@@ -1750,6 +1772,15 @@ async def compute_once() -> Dict[str, Any]:
     # Pre-build /api/data response bytes for all 3 tiers — O(1) serving per user
     _rebuild_data_cache(rows_out, cache_meta)
     asyncio.create_task(_rsnapshot_write())  # write snapshots to Redis for cross-process API workers
+
+    # Cycle metrics — log every cycle; warn if slow (>2000ms)
+    took_ms = int((time.time() - started) * 1000)
+    logger.info(
+        "Cycle: %d ms | MEXC: %d | Bybit: %d | BingX: %d | pairs: %d",
+        took_ms, len(mexc), len(bybit), len(bingx), len(rows_out),
+    )
+    if took_ms > 2000:
+        logger.warning("Cycle > 2000 ms: %d ms — consider increasing REFRESH_SEC", took_ms)
 
     return {
         "started_ts": started,
