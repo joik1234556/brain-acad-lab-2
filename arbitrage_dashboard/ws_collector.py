@@ -175,7 +175,11 @@ async def _mexc_ws(session: aiohttp.ClientSession) -> None:
         except Exception as exc:
             delay = _backoff(attempt)
             logger.warning("[MEXC WS] %s — reconnecting in %.0fs", exc, delay)
+            await asyncio.sleep(delay)
+            attempt += 1
+            continue
 
+        # Clean disconnect (no exception): brief reconnect delay
         await asyncio.sleep(_backoff(attempt))
         attempt += 1
 
@@ -283,7 +287,11 @@ async def _bybit_ws(session: aiohttp.ClientSession) -> None:
         except Exception as exc:
             delay = _backoff(attempt)
             logger.warning("[Bybit WS] %s — reconnecting in %.0fs", exc, delay)
+            await asyncio.sleep(delay)
+            attempt += 1
+            continue
 
+        # Clean disconnect (no exception): brief reconnect delay
         await asyncio.sleep(_backoff(attempt))
         attempt += 1
 
@@ -415,7 +423,11 @@ async def _bingx_ws(session: aiohttp.ClientSession) -> None:
         except Exception as exc:
             delay = _backoff(attempt)
             logger.warning("[BingX WS] %s — reconnecting in %.0fs", exc, delay)
+            await asyncio.sleep(delay)
+            attempt += 1
+            continue
 
+        # Clean disconnect (no exception): brief reconnect delay
         await asyncio.sleep(_backoff(attempt))
         attempt += 1
 
