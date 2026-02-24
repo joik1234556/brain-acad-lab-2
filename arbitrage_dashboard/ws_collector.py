@@ -663,6 +663,10 @@ async def _snapshot_loop() -> None:
             }
             _a._rebuild_data_cache(rows_out, cache_meta)
 
+            # Update arb:cache_meta so dashboard() page render shows fresh dbg data.
+            # (compute_once calls _rcache_set but ws_collector bypasses compute_once.)
+            asyncio.create_task(_a._rcache_set(cache_meta))
+
             # Only push to Redis + SSE when data changed (ETag differs)
             new_etag = _a._DATA_ETAG.get("paid", "")
             if new_etag != last_etag:

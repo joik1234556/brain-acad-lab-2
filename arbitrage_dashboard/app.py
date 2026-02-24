@@ -1699,7 +1699,21 @@ def _rebuild_data_cache(rows_out: List[dict], cache_meta: dict) -> None:
                 "spread_limit": spread_limit,
             },
         }
-        _DATA_CACHE[tier] = json.dumps(data, ensure_ascii=False).encode()
+        try:
+            raw_bytes = json.dumps(data, ensure_ascii=False, allow_nan=False).encode()
+        except (ValueError, TypeError):
+            # Fallback: sanitize NaN/inf → null so JSON is always valid
+            def _sanitize(obj: Any) -> Any:
+                if isinstance(obj, float):
+                    return None if not math.isfinite(obj) else obj
+                if isinstance(obj, dict):
+                    return {k: _sanitize(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_sanitize(v) for v in obj]
+                return obj
+            logger.warning("[cache] NaN detected in %s rows — sanitizing", tier)
+            raw_bytes = json.dumps(_sanitize(data), ensure_ascii=False).encode()
+        _DATA_CACHE[tier] = raw_bytes
         _DATA_ETAG[tier]  = '"' + hashlib.sha256(_DATA_CACHE[tier]).hexdigest()[:16] + '"'
 
 
