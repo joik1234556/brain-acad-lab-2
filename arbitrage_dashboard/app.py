@@ -1702,14 +1702,18 @@ def _rebuild_data_cache(rows_out: List[dict], cache_meta: dict) -> None:
         try:
             raw_bytes = json.dumps(data, ensure_ascii=False, allow_nan=False).encode()
         except (ValueError, TypeError):
-            # Fallback: sanitize NaN/inf → null so JSON is always valid
-            def _sanitize(obj: Any) -> Any:
+            # Fallback: sanitize NaN/inf → null so JSON is always valid.
+            # Data structure is at most 3 levels deep (data→rows→field),
+            # so recursion depth is bounded. max_depth=10 adds a safety cap.
+            def _sanitize(obj: Any, depth: int = 0) -> Any:
+                if depth > 10:
+                    return None
                 if isinstance(obj, float):
                     return None if not math.isfinite(obj) else obj
                 if isinstance(obj, dict):
-                    return {k: _sanitize(v) for k, v in obj.items()}
+                    return {k: _sanitize(v, depth + 1) for k, v in obj.items()}
                 if isinstance(obj, list):
-                    return [_sanitize(v) for v in obj]
+                    return [_sanitize(v, depth + 1) for v in obj]
                 return obj
             logger.warning("[cache] NaN detected in %s rows — sanitizing", tier)
             raw_bytes = json.dumps(_sanitize(data), ensure_ascii=False).encode()
