@@ -14,9 +14,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # --- Logging setup: stdout always; optional rotating file via LOG_FILE env var ---
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 _log_fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s", datefmt="%H:%M:%S")
 _root = logging.getLogger()
-_root.setLevel(logging.INFO)
+_root.setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
 _stdout_h = logging.StreamHandler(sys.stdout)
 _stdout_h.setFormatter(_log_fmt)
 _root.addHandler(_stdout_h)
@@ -26,7 +27,12 @@ if _log_file:
     _file_h = _RFH(_log_file, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
     _file_h.setFormatter(_log_fmt)
     _root.addHandler(_file_h)
+# Suppress duplicate log lines from uvicorn — it has its own handlers;
+# without this, each log line appears twice (once via root, once via uvicorn handler).
+for _uv_log in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_uv_log).propagate = False
 logger = logging.getLogger("arb_dashboard")
+logger.propagate = False
 
 import aiohttp
 import httpx
@@ -114,7 +120,7 @@ _MEXC_SYM_FUND_CACHE: Dict[str, dict] = {}
 _MEXC_INTERVALS: Dict[str, int] = {}
 # Unix timestamp of last full _MEXC_INTERVALS refresh (refetch when > TTL stale)
 _MEXC_INTERVALS_AT: float = 0.0
-MEXC_INTERVALS_TTL = 3600  # seconds; funding intervals rarely change — refresh hourly
+MEXC_INTERVALS_TTL = 21600  # seconds; funding intervals rarely change — refresh every 6h
 # Per-symbol Bybit funding interval cache, key = symbol e.g. "BTCUSDT" → hours.
 # Populated from /v5/market/instruments-info (TTL-cached — see BYBIT_INST_TTL).
 _BYBIT_INTERVALS: Dict[str, int] = {}
@@ -1210,9 +1216,12 @@ def _make_session(username: str) -> str:
     SESSIONS[token] = {"username": username, "expires": time.time() + SESSION_TTL_SEC}
     # Also store in Redis when available (survives server restarts)
     if _REDIS is not None:
-        asyncio.get_event_loop().create_task(
-            _REDIS.setex(f"arb:sess:{token}", SESSION_TTL_SEC, username)
-        )
+        try:
+            asyncio.get_running_loop().create_task(
+                _REDIS.setex(f"arb:sess:{token}", SESSION_TTL_SEC, username)
+            )
+        except RuntimeError:
+            pass  # no running loop (e.g. called from sync context in tests)
     return token
 
 
@@ -1343,7 +1352,7 @@ async def lifespan(_: FastAPI):
     # enough parallelism for PBKDF2 auth + _save_users without context-switch
     # overhead of many threads competing on 2 cores.
     cpu_count = os.cpu_count() or 2
-    asyncio.get_event_loop().set_default_executor(
+    asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=cpu_count * 2)
     )
     await _redis_connect()
@@ -1354,8 +1363,11 @@ async def lifespan(_: FastAPI):
     # separate collector.py process. This process only serves HTTP and reads
     # pre-built snapshots from Redis (written by collector).
     if not os.getenv("COLLECTOR_ONLY"):
+        logger.warning("Running in FULL mode (with updater) — set COLLECTOR_ONLY=1 for production")
         asyncio.create_task(updater_loop())
         asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
+    else:
+        logger.warning("Running in COLLECTOR_ONLY mode — no updater tasks started (reads from Redis)")
     # BingX intervals are inferred from nextFundingTime alignment in load_bingx() — no background task needed
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())

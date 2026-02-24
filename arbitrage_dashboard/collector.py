@@ -56,7 +56,7 @@ async def main() -> None:
 
     # ── Thread pool ──────────────────────────────────────────────────────
     cpu_count = os.cpu_count() or 2
-    asyncio.get_event_loop().set_default_executor(
+    asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=cpu_count * 2)
     )
 
@@ -99,11 +99,15 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, _log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # Suppress duplicate log lines from uvicorn (it has its own handlers)
+    for _uv in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(_uv).propagate = False
     try:
         import uvloop  # noqa: F401
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
