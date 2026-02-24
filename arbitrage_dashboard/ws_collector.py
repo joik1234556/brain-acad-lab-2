@@ -107,6 +107,13 @@ _bingx_raw_symbols: List[str] = []
 # Reference to app module — set in main() after import
 _a = None  # type: ignore[assignment]
 
+# Timestamp of last MEXC WS message — used to detect stale WS feed
+_mexc_ws_last_msg: float = 0.0
+# Interval between MEXC REST fallback refreshes (seconds)
+MEXC_REST_FALLBACK_INTERVAL = float(os.getenv("MEXC_REST_FALLBACK_SEC", "10.0"))
+# If MEXC WS has been silent for this long, trigger a REST refresh
+MEXC_WS_STALE_SEC = float(os.getenv("MEXC_WS_STALE_SEC", "15.0"))
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -200,6 +207,7 @@ async def _mexc_ws(session: aiohttp.ClientSession) -> None:
 
 def _on_mexc(raw: str) -> None:
     """Handle a single MEXC WS text message."""
+    global _mexc_ws_last_msg
     try:
         d = _loads(raw)
     except Exception:
@@ -212,6 +220,7 @@ def _on_mexc(raw: str) -> None:
     if data is None:
         return
     items: list = data if isinstance(data, list) else [data]
+    stored = 0
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -223,8 +232,14 @@ def _on_mexc(raw: str) -> None:
             continue
         bid  = _a.to_float(it.get("bid1"))
         ask  = _a.to_float(it.get("ask1"))
-        if not (math.isfinite(bid) and bid > 0
-                and math.isfinite(ask) and ask > 0):
+        last = _a.to_float(it.get("lastPrice"))
+        # bid1/ask1 are often 0 in MEXC WS push.tickers for low-volume symbols.
+        # Fall back to lastPrice (bid=ask=last) which is always present.
+        if not (math.isfinite(bid) and bid > 0):
+            bid = last
+        if not (math.isfinite(ask) and ask > 0):
+            ask = last
+        if not (math.isfinite(bid) and bid > 0):
             continue
         fund     = _a.to_float(it.get("fundingRate"))
         next_ts  = _a._pick_ts_or_delta(
@@ -238,7 +253,7 @@ def _on_mexc(raw: str) -> None:
             exchange="MEXC",
             bid=bid,
             ask=ask,
-            last=_a.to_float(it.get("lastPrice")),
+            last=last,
             vol24_usd=_a.to_float(it.get("amount24")),
             fund_rate=fund,
             fund24_est=_a.funding_24h_estimate(fund, interval_h),
@@ -246,6 +261,9 @@ def _on_mexc(raw: str) -> None:
             next_funding_ts=next_ts,
             funding_interval_h=interval_h,
         )
+        stored += 1
+    if stored > 0:
+        _mexc_ws_last_msg = time.monotonic()
 
 
 # ─── Bybit WS ────────────────────────────────────────────────────────────────
@@ -555,6 +573,42 @@ def _on_bingx(raw: str) -> None:
     )
 
 
+# ─── MEXC REST fallback ───────────────────────────────────────────────────────
+
+async def _mexc_rest_loop(session: aiohttp.ClientSession) -> None:
+    """Periodic MEXC REST fallback.
+
+    Runs every MEXC_REST_FALLBACK_INTERVAL seconds.  When MEXC WS has been
+    silent for MEXC_WS_STALE_SEC (WS not delivering any tickers), or when
+    prices["MEXC"] is empty, fetches data from the REST API and populates
+    prices["MEXC"] so the spread table still shows MEXC pairs.
+
+    WS data takes priority: if WS is working, it updates prices["MEXC"]
+    independently and the REST data only serves as a warm-start / fallback.
+    """
+    # Brief startup delay so WS has a chance to connect first
+    await asyncio.sleep(8.0)
+    while True:
+        try:
+            ws_stale = (time.monotonic() - _mexc_ws_last_msg) > MEXC_WS_STALE_SEC
+            mexc_empty = len(prices["MEXC"]) < 5
+            if ws_stale or mexc_empty:
+                logger.info(
+                    "[MEXC REST] Fetching REST data (ws_stale=%s, mexc_empty=%s)",
+                    ws_stale, mexc_empty,
+                )
+                rest_rows = await _a.load_mexc(session)
+                if rest_rows:
+                    # Only overwrite symbols not recently updated by WS
+                    ws_cutoff = time.monotonic() - MEXC_WS_STALE_SEC
+                    if ws_stale or mexc_empty:
+                        prices["MEXC"].update(rest_rows)
+                        logger.info("[MEXC REST] Updated %d symbols from REST", len(rest_rows))
+        except Exception as exc:
+            logger.warning("[MEXC REST] %s", exc)
+        await asyncio.sleep(MEXC_REST_FALLBACK_INTERVAL)
+
+
 # ─── Snapshot loop ────────────────────────────────────────────────────────────
 
 async def _snapshot_loop() -> None:
@@ -567,6 +621,7 @@ async def _snapshot_loop() -> None:
     while True:
         await asyncio.sleep(SNAPSHOT_THROTTLE)
         try:
+            t0 = time.monotonic()
             n_mexc  = len(prices["MEXC"])
             n_bybit = len(prices["Bybit"])
             n_bingx = len(prices["BingX"])
@@ -602,6 +657,7 @@ async def _snapshot_loop() -> None:
                     "bybit":   n_bybit,
                     "bingx":   n_bingx,
                     "kept":    len(rows_out),
+                    "took_ms": int((time.monotonic() - t0) * 1000),
                     "ws_mode": True,
                 },
             }
@@ -752,10 +808,11 @@ async def main() -> None:
 
     # ── Start WebSocket + snapshot tasks ──────────────────────────────────────
     tasks = [
-        asyncio.create_task(_mexc_ws(session),    name="mexc-ws"),
-        asyncio.create_task(_bybit_ws(session),   name="bybit-ws"),
-        asyncio.create_task(_bingx_ws(session),   name="bingx-ws"),
-        asyncio.create_task(_snapshot_loop(),      name="snapshot"),
+        asyncio.create_task(_mexc_ws(session),         name="mexc-ws"),
+        asyncio.create_task(_mexc_rest_loop(session),   name="mexc-rest"),
+        asyncio.create_task(_bybit_ws(session),        name="bybit-ws"),
+        asyncio.create_task(_bingx_ws(session),        name="bingx-ws"),
+        asyncio.create_task(_snapshot_loop(),           name="snapshot"),
     ]
     logger.info("ws_collector tasks started: %s", [t.get_name() for t in tasks])
 
