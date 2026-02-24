@@ -668,9 +668,15 @@ async def _snapshot_loop() -> None:
             if new_etag != last_etag:
                 last_etag = new_etag
                 asyncio.create_task(_a._rsnapshot_write())
-                _a._broadcast_sse(
-                    json.dumps({"t": "upd", "at": cache_meta["updated_at"]})
-                )
+                # Direct await publish — more reliable than _broadcast_sse() from
+                # ws_collector context (_broadcast_sse silently swallows exceptions
+                # in create_task, causing no PUBLISH even though SET works fine).
+                # ws_collector ALWAYS has _REDIS (exits at startup if Redis missing).
+                sse_payload = json.dumps({"t": "upd", "at": cache_meta["updated_at"]})
+                try:
+                    await _a._REDIS.publish(_a._REDIS_CHANNEL_SSE, sse_payload)
+                except Exception as pub_exc:
+                    logger.warning("[snapshot] Redis PUBLISH failed: %s", pub_exc)
                 logger.debug(
                     "[snapshot] MEXC:%d Bybit:%d BingX:%d pairs:%d",
                     n_mexc, n_bybit, n_bingx, len(rows_out),

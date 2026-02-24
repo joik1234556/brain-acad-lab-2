@@ -1261,6 +1261,24 @@ def _rl_check(store: Dict[str, int], key: str, limit: int) -> bool:
     return store[key] <= limit
 
 
+class GZipExcludeMiddleware(GZipMiddleware):
+    """GZipMiddleware that skips compression for SSE endpoints.
+
+    GZipMiddleware buffers the entire streaming response body to compress it.
+    For Server-Sent Events (Content-Type: text/event-stream), this means events
+    are never flushed until the client disconnects — the SSE stream appears frozen.
+    This subclass bypasses gzip for /events so SSE works correctly.
+    All other paths are compressed normally.
+    """
+    _NO_GZIP: tuple = ("/events",)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("path", "") in self._NO_GZIP:
+            await self.app(scope, receive, send)
+        else:
+            await super().__call__(scope, receive, send)
+
+
 class SecurityHeadersMiddleware:
     """Pure ASGI security headers middleware — zero body-buffering overhead.
     BaseHTTPMiddleware buffers the response body twice; this implementation
@@ -1409,7 +1427,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=500)  # ~120KB → ~25KB (-80%)
+app.add_middleware(GZipExcludeMiddleware, minimum_size=500)  # gzip for all paths except /events
 app.add_middleware(SecurityHeadersMiddleware)  # nosniff, no-framing, XSS protection
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
