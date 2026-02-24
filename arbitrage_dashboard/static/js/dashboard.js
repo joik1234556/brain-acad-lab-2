@@ -371,11 +371,17 @@ rows.forEach(r=>{
 existingRows.forEach(tr=>tr.remove());
 }
 
+let _lastDataEtag='';
 async function refreshData(){
   try{
-    // cache:'no-cache' sends If-None-Match; 304 = data unchanged → skip re-render
-    const resp=await fetch('/api/data',{cache:'no-cache',headers:authHeaders({})});
-    if(resp.status===304)return;
+    // Send If-None-Match manually so 304 works regardless of browser cache policy.
+    // cache:'no-cache' still bypasses stale browser cache entries.
+    const hdrs=authHeaders({});
+    if(_lastDataEtag)hdrs['If-None-Match']=_lastDataEtag;
+    const resp=await fetch('/api/data',{cache:'no-cache',headers:hdrs});
+    if(resp.status===304)return;  // data unchanged → skip re-render
+    const etag=resp.headers.get('etag');
+    if(etag)_lastDataEtag=etag;
     STATE.data=await resp.json();
   }catch(e){console.error('refreshData failed',e);return;}
   render();

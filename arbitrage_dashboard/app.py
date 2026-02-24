@@ -891,6 +891,13 @@ async def load_bingx(session: aiohttp.ClientSession, candidate_norm: List[str], 
                     ask = _pick_float(tick, ["askPrice", "ask", "bestAskPrice", "bestAsk"])
                 last = _pick_float(tick, ["lastPrice", "last", "close", "markPrice", "indexPrice"])
 
+                # When bid/ask missing (no book data for low-volume symbols), fall back to lastPrice.
+                # Same logic as ws_collector._on_bingx — lastPrice is better than rejecting entirely.
+                if not is_pos(bid) and is_pos(last):
+                    bid = last
+                if not is_pos(ask) and is_pos(last):
+                    ask = last
+
                 vol_quote = _pick_float(tick, [
                     "quoteVolume", "quoteQty", "turnover", "turnover24h", "turnover24H", "quoteVolume24h", "quoteVolume24H",
                     "amountQuote", "volumeQuote",
@@ -1378,7 +1385,10 @@ async def lifespan(_: FastAPI):
     else:
         logger.warning("Running in COLLECTOR_ONLY mode — no updater tasks started (reads from Redis)")
     # BingX intervals are inferred from nextFundingTime alignment in load_bingx() — no background task needed
-    if _REDIS is not None:
+    # _redis_sse_subscriber only needed in COLLECTOR_ONLY mode: in full mode, _broadcast_sse puts
+    # messages directly into _SSE_QUEUES (no Redis round-trip needed; starting it in full mode
+    # would cause every SSE client to receive each update TWICE — once direct, once via Redis).
+    if _REDIS is not None and os.getenv("COLLECTOR_ONLY"):
         asyncio.create_task(_redis_sse_subscriber())
     yield
     await _HTTP_SESSION.close()
@@ -2042,9 +2052,9 @@ async def api_data(request: Request):
     if cached:
         etag = _DATA_ETAG.get(tier, "")
         if etag and request.headers.get("If-None-Match") == etag:
-            return Response(status_code=304, headers={"ETag": etag})
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
         return Response(content=cached, media_type="application/json",
-                        headers={"ETag": etag} if etag else {})
+                        headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {"Cache-Control": "no-cache"})
 
     # Fallback: first request before compute_once() has run at least once.
     live = await _rlive_all()
