@@ -1328,8 +1328,12 @@ async def lifespan(_: FastAPI):
     # Persistent HTTP session — reuses TCP connections across all compute cycles.
     connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300)
     _HTTP_SESSION = aiohttp.ClientSession(connector=connector)
-    asyncio.create_task(updater_loop())
-    asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
+    # When COLLECTOR_ONLY=1 (API-only mode): exchange fetching runs in a
+    # separate collector.py process. This process only serves HTTP and reads
+    # pre-built snapshots from Redis (written by collector).
+    if not os.getenv("COLLECTOR_ONLY"):
+        asyncio.create_task(updater_loop())
+        asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
     # BingX intervals are inferred from nextFundingTime alignment in load_bingx() — no background task needed
     if _REDIS is not None:
         asyncio.create_task(_redis_sse_subscriber())
@@ -1396,6 +1400,7 @@ _STATIC_VER = hex(int(_START_TIME))[2:]
 _REDIS_KEY_LIVE = "arb:live"
 _REDIS_KEY_CACHE_META = "arb:cache_meta"
 _REDIS_CHANNEL_SSE = "arb:sse"
+_REDIS_KEY_SNAP = "arb:snap"        # arb:snap:{tier} → pre-built JSON bytes
 _REDIS: Optional[Any] = None  # redis.asyncio.Redis instance, or None
 
 
@@ -1626,6 +1631,26 @@ def _rebuild_data_cache(rows_out: List[dict], cache_meta: dict) -> None:
         _DATA_ETAG[tier]  = '"' + hashlib.sha256(_DATA_CACHE[tier]).hexdigest()[:16] + '"'
 
 
+async def _rsnapshot_write() -> None:
+    """Write pre-built snapshot bytes to Redis so other processes (API workers
+    without a local updater_loop) can serve /api/data without recomputing.
+
+    Called as a fire-and-forget task from compute_once() after _rebuild_data_cache().
+    Each tier key has TTL=120s — API falls back to live HGETALL if collector stops.
+    """
+    if _REDIS is None:
+        return
+    try:
+        pipe = _REDIS.pipeline(transaction=False)
+        for t in ("guest", "paid", "admin"):
+            if t in _DATA_CACHE:
+                pipe.set(f"{_REDIS_KEY_SNAP}:{t}", _DATA_CACHE[t], ex=120)
+                pipe.set(f"{_REDIS_KEY_SNAP}:etag:{t}", _DATA_ETAG.get(t, ""), ex=120)
+        await pipe.execute()
+    except Exception as exc:
+        logger.debug("[Redis] _rsnapshot_write error: %s", exc)
+
+
 async def compute_once() -> Dict[str, Any]:
     started = time.time()
     # Use the persistent session (created in lifespan) — avoids new TCP connections every cycle.
@@ -1724,6 +1749,7 @@ async def compute_once() -> Dict[str, Any]:
     await _rcache_set(cache_meta)
     # Pre-build /api/data response bytes for all 3 tiers — O(1) serving per user
     _rebuild_data_cache(rows_out, cache_meta)
+    asyncio.create_task(_rsnapshot_write())  # write snapshots to Redis for cross-process API workers
 
     return {
         "started_ts": started,
@@ -1944,6 +1970,22 @@ async def api_data(request: Request):
     tier = "admin" if is_admin else ("paid" if is_paid else "guest")
 
     cached = _DATA_CACHE.get(tier)
+    # Cross-process mode: when COLLECTOR_ONLY=1 env var is set, the API has no local
+    # compute loop — collector writes arb:snap:{tier} to Redis, API reads it here.
+    if not cached and _REDIS is not None:
+        try:
+            snap = await _REDIS.get(f"{_REDIS_KEY_SNAP}:{tier}")
+            if snap:
+                etag = await _REDIS.get(f"{_REDIS_KEY_SNAP}:etag:{tier}") or ""
+                if etag and request.headers.get("If-None-Match") == etag:
+                    from starlette.responses import Response as _Resp
+                    return _Resp(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+                snap_bytes = snap if isinstance(snap, bytes) else snap.encode()
+                from starlette.responses import Response as _Resp
+                return _Resp(content=snap_bytes, media_type="application/json",
+                             headers={"ETag": etag, "Cache-Control": "no-cache"} if etag else {})
+        except Exception:
+            pass  # fall through to live fallback
     if cached:
         etag = _DATA_ETAG.get(tier, "")
         if etag and request.headers.get("If-None-Match") == etag:
