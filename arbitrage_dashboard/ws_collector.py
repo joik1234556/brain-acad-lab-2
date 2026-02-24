@@ -719,7 +719,7 @@ async def _snapshot_loop() -> None:
             new_etag = _a._DATA_ETAG.get("paid", "")
             if new_etag != last_etag:
                 last_etag = new_etag
-                asyncio.create_task(_a._rsnapshot_write())
+                await _a._rsnapshot_write()
                 # Direct await publish — more reliable than _broadcast_sse() from
                 # ws_collector context (_broadcast_sse silently swallows exceptions
                 # in create_task, causing no PUBLISH even though SET works fine).

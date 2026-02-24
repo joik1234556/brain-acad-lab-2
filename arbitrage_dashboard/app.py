@@ -1761,9 +1761,18 @@ async def compute_once() -> Dict[str, Any]:
         min_vol = float(CFG.get("min_vol", DEFAULT_MIN_VOL_USD))
         min_spread = float(CFG.get("min_spread", DEFAULT_MIN_SPREAD))
 
-        # Phase 1: immediately push MEXC+Bybit pairs so clients see updates fast
+        # Phase 1: immediately push MEXC+Bybit pairs so clients see updates fast.
+        # Pre-build _DATA_CACHE from Phase 1 rows BEFORE broadcasting SSE so
+        # that when clients call /api/data they get MEXC+Bybit data immediately
+        # instead of the loading placeholder (which happened when the broadcast
+        # fired before _rebuild_data_cache was called).
         await _push_pairs_to_live_rows(mexc, bybit, {}, min_vol, min_spread)
-        _broadcast_sse(json.dumps({"t": "upd", "at": time.strftime("%H:%M:%S")}))
+        _phase1_at = time.strftime("%H:%M:%S")
+        _rebuild_data_cache(list(LIVE_ROWS.values()), {
+            "updated_at": _phase1_at,
+            "dbg": {"mexc": len(mexc), "bybit": len(bybit), "bingx": 0, "kept": len(LIVE_ROWS), "took_ms": 0},
+        })
+        _broadcast_sse(json.dumps({"t": "upd", "at": _phase1_at}))
 
         candidates: Dict[str, float] = {}
         for source in (mexc, bybit):

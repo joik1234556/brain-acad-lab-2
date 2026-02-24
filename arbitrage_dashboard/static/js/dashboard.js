@@ -320,7 +320,7 @@ function render(){
 if(!STATE.data)return;
 const srvLimit=(STATE.data.access&&Number.isFinite(STATE.data.access.spread_limit))?STATE.data.access.spread_limit:null;
 document.getElementById('updated').textContent=`Updated: ${STATE.data.updated_at||'—'}`;
-const dbgEl=document.getElementById('dbg'); const dbg=(STATE.data&&STATE.data.dbg)||{mexc:0,bybit:0,bingx:0,kept:0,took_ms:0}; if(STATE.user&&STATE.user.is_admin){dbgEl.style.display='inline-block'; dbgEl.textContent=`DBG${dbg.ws_mode?' WS':''} mexc=${dbg.mexc} bybit=${dbg.bybit} bingx=${dbg.bingx} kept=${dbg.kept} took=${dbg.took_ms}ms`;} else {dbgEl.style.display='none';}
+const dbgEl=document.getElementById('dbg'); const dbg=(STATE.data&&STATE.data.dbg)||{}; if(STATE.user&&STATE.user.is_admin){dbgEl.style.display='inline-block'; if(dbg.loading){dbgEl.textContent='⏳ DBG: loading...';}else{dbgEl.textContent=`DBG${dbg.ws_mode?' WS':''} mexc=${dbg.mexc??'?'} bybit=${dbg.bybit??'?'} bingx=${dbg.bingx??'?'} kept=${dbg.kept??'?'} took=${dbg.took_ms??'?'}ms`;}} else {dbgEl.style.display='none';}
 let rows=[...(STATE.data.rows||[])];
 if(srvLimit!==null){rows=rows.filter(r=>Number.isFinite(r.spread)?r.spread<=srvLimit:false);}
 rows=applyFilters(rows);
@@ -433,7 +433,7 @@ async function boot(){
     apiGet('/api/data'),       // get fresh data with auth token (full rows for logged-in users)
     apiGet('/api/assets'),     // logos + sounds
   ]);
-  if(_data.status==='fulfilled'&&_data.value&&_data.value.rows)STATE.data=_data.value;
+  if(_data.status==='fulfilled'&&_data.value&&_data.value.rows&&_data.value.rows.length>0)STATE.data=_data.value;
   if(_assets.status==='fulfilled'&&_assets.value)STATE.assets=_assets.value||{logos:{},sounds:[]};
 
   const ss=document.getElementById('soundSel'); ss.innerHTML='';
