@@ -81,6 +81,7 @@ AUTH_KEY_PATH = os.path.join(BASE_DIR, "auth_secret.key")
 USERS_DB_PATH = os.path.join(BASE_DIR, "users.db.enc")
 REFRESH_SEC = int(os.getenv("REFRESH_SEC", "3"))       # collector cycle interval (seconds); override via env
 CYCLE_WARN_MS = 2000                                    # log warning when compute_once exceeds this
+COLLECTOR_ONLY: bool = os.getenv("COLLECTOR_ONLY") == "1"  # True when running as API-only (no exchange fetch)
 DEFAULT_MIN_VOL_USD = 5_000_000.0
 DEFAULT_MIN_SPREAD = 0.0
 HTTP_TIMEOUT = 12
@@ -1396,7 +1397,7 @@ async def lifespan(_: FastAPI):
     # When COLLECTOR_ONLY=1 (API-only mode): exchange fetching runs in a
     # separate collector.py process. This process only serves HTTP and reads
     # pre-built snapshots from Redis (written by collector).
-    if not os.getenv("COLLECTOR_ONLY"):
+    if not COLLECTOR_ONLY:
         logger.warning("Running in FULL mode (with updater) — set COLLECTOR_ONLY=1 for production")
         asyncio.create_task(updater_loop())
         asyncio.create_task(_mexc_intervals_refresher())   # non-blocking MEXC interval refresh
@@ -1406,7 +1407,7 @@ async def lifespan(_: FastAPI):
     # _redis_sse_subscriber only needed in COLLECTOR_ONLY mode: in full mode, _broadcast_sse puts
     # messages directly into _SSE_QUEUES (no Redis round-trip needed; starting it in full mode
     # would cause every SSE client to receive each update TWICE — once direct, once via Redis).
-    if _REDIS is not None and os.getenv("COLLECTOR_ONLY") == "1":
+    if _REDIS is not None and COLLECTOR_ONLY:
         asyncio.create_task(_redis_sse_subscriber())
     yield
     await _HTTP_SESSION.close()
@@ -1898,8 +1899,8 @@ async def index(request: Request):
     if not snap_bytes and _REDIS is not None:
         try:
             snap_bytes = await _REDIS.get(f"{_REDIS_KEY_SNAP}:guest")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[index] Redis arb:snap:guest unavailable: %s", exc)
     if snap_bytes:
         snap_str = snap_bytes.decode() if isinstance(snap_bytes, bytes) else snap_bytes
         initial_data = snap_str
@@ -2136,7 +2137,7 @@ async def graph_page(request: Request):
 
 @app.post("/api/refresh")
 async def api_refresh():
-    if os.getenv("COLLECTOR_ONLY") == "1":
+    if COLLECTOR_ONLY:
         return JSONResponse({"ok": False, "error": "collector_only_mode",
                              "detail": "Data is managed by the collector process. Use ws_collector.py."}, status_code=503)
     data = await compute_once()
